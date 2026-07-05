@@ -1,0 +1,747 @@
+     1→'use strict';
+     2→
+     3→const { test } = require('node:test');
+     4→const assert = require('node:assert');
+     5→
+     6→const {
+     7→  SUBSCRIPTION_TIERS,
+     8→  validateApiKey,
+     9→  subscriptionMiddleware,
+    10→  requireFeature,
+    11→  limitEvents,
+    12→  createSubscriptionStore,
+    13→  DEMO_PREMIUM_KEY,
+    14→} = require('../src/subscription');
+    15→const { createSubscriptionRoutes } = require('../src/subscription-routes');
+    16→
+    17→// =========================================================================
+    18→// Helpers — minimal mock req/res/next for Express-style middleware testing
+    19→// =========================================================================
+    20→
+    21→function createMockRes() {
+    22→  let _json = null;
+    23→  let _status = 200;
+    24→  const res = {
+    25→    headers: {},
+    26→    status(code) {
+    27→      _status = code;
+    28→      return res;
+    29→    },
+    30→    json(data) {
+    31→      _json = data;
+    32→      return res;
+    33→    },
+    34→    get statusCode() { return _status; },
+    35→    get jsonBody() { return _json; },
+    36→  };
+    37→  return res;
+    38→}
+    39→
+    40→function createReq(overrides = {}) {
+    41→  return {
+    42→    headers: overrides.headers || {},
+    43→    query: overrides.query || {},
+    44→    body: overrides.body || {},
+    45→    subscription: undefined,
+    46→    ...overrides,
+    47→  };
+    48→}
+    49→
+    50→/**
+    51→ * Run middleware with mock req/res/next and return a promise that resolves
+    52→ * once next() is called (or immediately if the middleware sends a response).
+    53→ */
+    54→function runMiddleware(mw, req, res) {
+    55→  return new Promise((resolve) => {
+    56→    const next = () => resolve();
+    57→    const result = mw(req, res, next);
+    58→    // If middleware returns a promise (unlikely for this code but safe), chain it
+    59→    if (result && typeof result.then === 'function') {
+    60→      result.then(resolve, resolve);
+    61→    }
+    62→  });
+    63→}
+    64→
+    65→// =========================================================================
+    66→// SUBSCRIPTION_TIERS
+    67→// =========================================================================
+    68→
+    69→test('SUBSCRIPTION_TIERS has free, pro, and premium tiers', () => {
+    70→  assert.ok(SUBSCRIPTION_TIERS.free);
+    71→  assert.ok(SUBSCRIPTION_TIERS.pro);
+    72→  assert.ok(SUBSCRIPTION_TIERS.premium);
+    73→});
+    74→
+    75→test('Free tier has correct limits and features', () => {
+    76→  const f = SUBSCRIPTION_TIERS.free;
+    77→  assert.strictEqual(f.name, 'Free');
+    78→  assert.strictEqual(f.maxEvents, 10);
+    79→  assert.strictEqual(f.minRefreshMs, 300_000);
+    80→  assert.strictEqual(f.liveOdds, false);
+    81→  assert.deepStrictEqual(f.features, ['scanner', 'calculator', 'matches', 'bookmakers']);
+    82→});
+    83→
+    84→test('Pro tier has correct limits and features', () => {
+    85→  const p = SUBSCRIPTION_TIERS.pro;
+    86→  assert.strictEqual(p.name, 'Pro');
+    87→  assert.strictEqual(p.maxEvents, 100);
+    88→  assert.strictEqual(p.minRefreshMs, 60_000);
+    89→  assert.strictEqual(p.liveOdds, true);
+    90→  assert.ok(p.features.includes('value'));
+    91→  assert.ok(p.features.includes('journal'));
+    92→  assert.ok(!p.features.includes('ai'));
+    93→  assert.ok(!p.features.includes('analytics'));
+    94→  assert.ok(!p.features.includes('movement'));
+    95→});
+    96→
+    97→test('Premium tier has all features', () => {
+    98→  const p = SUBSCRIPTION_TIERS.premium;
+    99→  assert.strictEqual(p.name, 'Premium');
+   100→  assert.strictEqual(p.maxEvents, Infinity);
+   101→  assert.strictEqual(p.minRefreshMs, 30_000);
+   102→  assert.strictEqual(p.liveOdds, true);
+   103→  assert.ok(p.features.includes('ai'));
+   104→  assert.ok(p.features.includes('analytics'));
+   105→  assert.ok(p.features.includes('movement'));
+   106→  assert.ok(p.features.includes('value'));
+   107→  assert.ok(p.features.includes('journal'));
+   108→});
+   109→
+   110→// =========================================================================
+   111→// createSubscriptionStore
+   112→// =========================================================================
+   113→
+   114→test('createSubscriptionStore returns store with required methods', () => {
+   115→  const store = createSubscriptionStore();
+   116→  assert.strictEqual(typeof store.addKey, 'function');
+   117→  assert.strictEqual(typeof store.removeKey, 'function');
+   118→  assert.strictEqual(typeof store.validate, 'function');
+   119→  assert.strictEqual(typeof store.size, 'number');
+   120→});
+   121→
+   122→test('Store is pre-seeded with demo premium key', () => {
+   123→  const store = createSubscriptionStore();
+   124→  assert.strictEqual(store.size, 1);
+   125→
+   126→  const result = store.validate(DEMO_PREMIUM_KEY);
+   127→  assert.ok(result);
+   128→  assert.strictEqual(result.tier, 'premium');
+   129→  assert.ok(result.expiresAt);
+   130→});
+   131→
+   132→test('Store addKey registers a new key', () => {
+   133→  const store = createSubscriptionStore();
+   134→  const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+   135→  store.addKey('test_pro_key', 'pro', expiry);
+   136→
+   137→  const result = store.validate('test_pro_key');
+   138→  assert.ok(result);
+   139→  assert.strictEqual(result.tier, 'pro');
+   140→  assert.strictEqual(result.expiresAt, expiry);
+   141→});
+   142→
+   143→test('Store addKey throws on invalid tier', () => {
+   144→  const store = createSubscriptionStore();
+   145→  assert.throws(() => store.addKey('key', 'enterprise'), /Invalid key or tier/);
+   146→});
+   147→
+   148→test('Store addKey throws on empty key', () => {
+   149→  const store = createSubscriptionStore();
+   150→  assert.throws(() => store.addKey('', 'pro'), /Invalid key or tier/);
+   151→});
+   152→
+   153→test('Store removeKey removes an existing key', () => {
+   154→  const store = createSubscriptionStore();
+   155→  store.addKey('to_remove', 'pro', null);
+   156→  assert.strictEqual(store.size, 2); // demo + new
+   157→  assert.ok(store.removeKey('to_remove'));
+   158→  assert.strictEqual(store.size, 1);
+   159→  assert.strictEqual(store.validate('to_remove'), null);
+   160→});
+   161→
+   162→test('Store removeKey returns false for non-existent key', () => {
+   163→  const store = createSubscriptionStore();
+   164→  assert.strictEqual(store.removeKey('nonexistent'), false);
+   165→});
+   166→
+   167→test('Store validate returns null for unknown key', () => {
+   168→  const store = createSubscriptionStore();
+   169→  assert.strictEqual(store.validate('no_such_key'), null);
+   170→});
+   171→
+   172→test('Store validate returns null for empty/null/undefined key', () => {
+   173→  const store = createSubscriptionStore();
+   174→  assert.strictEqual(store.validate(''), null);
+   175→  assert.strictEqual(store.validate(null), null);
+   176→  assert.strictEqual(store.validate(undefined), null);
+   177→});
+   178→
+   179→test('Store validate rejects expired keys and cleans them up', () => {
+   180→  const store = createSubscriptionStore();
+   181→  const pastExpiry = new Date(Date.now() - 1000).toISOString();
+   182→  store.addKey('expired_key', 'pro', pastExpiry);
+   183→
+   184→  // Before validation check, store has the key
+   185→  assert.strictEqual(store.size, 2);
+   186→
+   187→  const result = store.validate('expired_key');
+   188→  assert.strictEqual(result, null);
+   189→
+   190→  // Expired key should have been cleaned up
+   191→  assert.strictEqual(store.size, 1);
+   192→});
+   193→
+   194→test('Store validate works with null expiry (never expires)', () => {
+   195→  const store = createSubscriptionStore();
+   196→  store.addKey('never_expires', 'free', null);
+   197→
+   198→  const result = store.validate('never_expires');
+   199→  assert.ok(result);
+   200→  assert.strictEqual(result.tier, 'free');
+   201→  assert.strictEqual(result.expiresAt, null);
+   202→});
+   203→
+   204→// =========================================================================
+   205→// validateApiKey
+   206→// =========================================================================
+   207→
+   208→test('validateApiKey returns tier info for valid key', () => {
+   209→  const store = createSubscriptionStore();
+   210→  const result = validateApiKey(DEMO_PREMIUM_KEY, store);
+   211→  assert.ok(result);
+   212→  assert.strictEqual(result.tier, 'premium');
+   213→});
+   214→
+   215→test('validateApiKey returns null for invalid key', () => {
+   216→  const store = createSubscriptionStore();
+   217→  assert.strictEqual(validateApiKey('bad_key', store), null);
+   218→});
+   219→
+   220→test('validateApiKey returns null for non-string input', () => {
+   221→  const store = createSubscriptionStore();
+   222→  assert.strictEqual(validateApiKey(null, store), null);
+   223→  assert.strictEqual(validateApiKey(undefined, store), null);
+   224→  assert.strictEqual(validateApiKey(123, store), null);
+   225→});
+   226→
+   227→test('validateApiKey trims whitespace from key', () => {
+   228→  const store = createSubscriptionStore();
+   229→  const result = validateApiKey(`  ${DEMO_PREMIUM_KEY}  `, store);
+   230→  assert.ok(result);
+   231→  assert.strictEqual(result.tier, 'premium');
+   232→});
+   233→
+   234→// =========================================================================
+   235→// subscriptionMiddleware
+   236→// =========================================================================
+   237→
+   238→test('subscriptionMiddleware defaults to free tier when no key is provided', async () => {
+   239→  const store = createSubscriptionStore();
+   240→  const mw = subscriptionMiddleware(store);
+   241→  const req = createReq();
+   242→  const res = createMockRes();
+   243→
+   244→  await runMiddleware(mw, req, res);
+   245→
+   246→  assert.strictEqual(req.subscription.tier, 'free');
+   247→  assert.strictEqual(req.subscription.maxEvents, 10);
+   248→  assert.strictEqual(req.subscription.liveOdds, false);
+   249→  assert.strictEqual(req.subscription.isPremium, false);
+   250→  assert.strictEqual(req.subscription.isPro, false);
+   251→});
+   252→
+   253→test('subscriptionMiddleware reads key from Authorization Bearer header', async () => {
+   254→  const store = createSubscriptionStore();
+   255→  const mw = subscriptionMiddleware(store);
+   256→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   257→  const res = createMockRes();
+   258→
+   259→  await runMiddleware(mw, req, res);
+   260→
+   261→  assert.strictEqual(req.subscription.tier, 'premium');
+   262→  assert.strictEqual(req.subscription.maxEvents, Infinity);
+   263→  assert.strictEqual(req.subscription.liveOdds, true);
+   264→  assert.strictEqual(req.subscription.isPremium, true);
+   265→  assert.strictEqual(req.subscription.isPro, true);
+   266→});
+   267→
+   268→test('subscriptionMiddleware reads key from api_key query parameter', async () => {
+   269→  const store = createSubscriptionStore();
+   270→  store.addKey('my_pro_key', 'pro', null);
+   271→  const mw = subscriptionMiddleware(store);
+   272→  const req = createReq({ query: { api_key: 'my_pro_key' } });
+   273→  const res = createMockRes();
+   274→
+   275→  await runMiddleware(mw, req, res);
+   276→
+   277→  assert.strictEqual(req.subscription.tier, 'pro');
+   278→  assert.strictEqual(req.subscription.isPro, true);
+   279→  assert.strictEqual(req.subscription.isPremium, false);
+   280→});
+   281→
+   282→test('subscriptionMiddleware prefers Bearer header over query param', async () => {
+   283→  const store = createSubscriptionStore();
+   284→  store.addKey('pro_query_key', 'pro', null);
+   285→  const mw = subscriptionMiddleware(store);
+   286→  const req = createReq({
+   287→    headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` },
+   288→    query: { api_key: 'pro_query_key' },
+   289→  });
+   290→  const res = createMockRes();
+   291→
+   292→  await runMiddleware(mw, req, res);
+   293→
+   294→  // Should resolve to premium (from Bearer), not pro (from query)
+   295→  assert.strictEqual(req.subscription.tier, 'premium');
+   296→});
+   297→
+   298→test('subscriptionMiddleware falls back to free for invalid key', async () => {
+   299→  const store = createSubscriptionStore();
+   300→  const mw = subscriptionMiddleware(store);
+   301→  const req = createReq({ headers: { authorization: 'Bearer invalid_key' } });
+   302→  const res = createMockRes();
+   303→
+   304→  await runMiddleware(mw, req, res);
+   305→
+   306→  assert.strictEqual(req.subscription.tier, 'free');
+   307→});
+   308→
+   309→test('subscriptionMiddleware includes expiresAt when present', async () => {
+   310→  const store = createSubscriptionStore();
+   311→  const mw = subscriptionMiddleware(store);
+   312→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   313→  const res = createMockRes();
+   314→
+   315→  await runMiddleware(mw, req, res);
+   316→
+   317→  assert.ok(req.subscription.expiresAt);
+   318→});
+   319→
+   320→test('subscriptionMiddleware sets expiresAt to null for free tier (no key)', async () => {
+   321→  const store = createSubscriptionStore();
+   322→  const mw = subscriptionMiddleware(store);
+   323→  const req = createReq();
+   324→  const res = createMockRes();
+   325→
+   326→  await runMiddleware(mw, req, res);
+   327→
+   328→  assert.strictEqual(req.subscription.expiresAt, null);
+   329→});
+   330→
+   331→test('subscriptionMiddleware attaches full feature list to req.subscription', async () => {
+   332→  const store = createSubscriptionStore();
+   333→  const mw = subscriptionMiddleware(store);
+   334→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   335→  const res = createMockRes();
+   336→
+   337→  await runMiddleware(mw, req, res);
+   338→
+   339→  assert.ok(Array.isArray(req.subscription.features));
+   340→  assert.ok(req.subscription.features.length > 0);
+   341→});
+   342→
+   343→// =========================================================================
+   344→// requireFeature
+   345→// =========================================================================
+   346→
+   347→test('requireFeature allows access when feature is available', async () => {
+   348→  const store = createSubscriptionStore();
+   349→  const mw = subscriptionMiddleware(store);
+   350→  const guard = requireFeature('scanner');
+   351→  const req = createReq();
+   352→  const res = createMockRes();
+   353→
+   354→  await runMiddleware(mw, req, res);
+   355→  await runMiddleware(guard, req, res);
+   356→
+   357→  assert.strictEqual(res.statusCode, 200);
+   358→});
+   359→
+   360→test('requireFeature returns 403 when feature is not available', async () => {
+   361→  const store = createSubscriptionStore();
+   362→  const mw = subscriptionMiddleware(store);
+   363→  const guard = requireFeature('ai');
+   364→  const req = createReq();
+   365→  const res = createMockRes();
+   366→
+   367→  await runMiddleware(mw, req, res);
+   368→  await runMiddleware(guard, req, res);
+   369→
+   370→  assert.strictEqual(res.statusCode, 403);
+   371→  assert.strictEqual(res.jsonBody.error, 'Feature not available');
+   372→  assert.strictEqual(res.jsonBody.feature, 'ai');
+   373→  assert.strictEqual(res.jsonBody.currentTier, 'free');
+   374→  assert.strictEqual(res.jsonBody.requiredTier, 'premium');
+   375→});
+   376→
+   377→test('requireFeature returns 403 with correct requiredTier for pro features', async () => {
+   378→  const store = createSubscriptionStore();
+   379→  const mw = subscriptionMiddleware(store);
+   380→  const guard = requireFeature('value');
+   381→  const req = createReq();
+   382→  const res = createMockRes();
+   383→
+   384→  await runMiddleware(mw, req, res);
+   385→  await runMiddleware(guard, req, res);
+   386→
+   387→  assert.strictEqual(res.statusCode, 403);
+   388→  assert.strictEqual(res.jsonBody.requiredTier, 'pro');
+   389→});
+   390→
+   391→test('requireFeature allows pro users access to pro features', async () => {
+   392→  const store = createSubscriptionStore();
+   393→  store.addKey('pro_user', 'pro', null);
+   394→  const mw = subscriptionMiddleware(store);
+   395→  const guard = requireFeature('value');
+   396→  const req = createReq({ headers: { authorization: 'Bearer pro_user' } });
+   397→  const res = createMockRes();
+   398→
+   399→  await runMiddleware(mw, req, res);
+   400→  await runMiddleware(guard, req, res);
+   401→
+   402→  assert.strictEqual(res.statusCode, 200);
+   403→});
+   404→
+   405→test('requireFeature denies pro users access to premium-only features', async () => {
+   406→  const store = createSubscriptionStore();
+   407→  store.addKey('pro_user2', 'pro', null);
+   408→  const mw = subscriptionMiddleware(store);
+   409→  const guard = requireFeature('ai');
+   410→  const req = createReq({ headers: { authorization: 'Bearer pro_user2' } });
+   411→  const res = createMockRes();
+   412→
+   413→  await runMiddleware(mw, req, res);
+   414→  await runMiddleware(guard, req, res);
+   415→
+   416→  assert.strictEqual(res.statusCode, 403);
+   417→});
+   418→
+   419→test('requireFeature allows premium users access to all features', async () => {
+   420→  const store = createSubscriptionStore();
+   421→  const mw = subscriptionMiddleware(store);
+   422→  const guard = requireFeature('ai');
+   423→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   424→  const res = createMockRes();
+   425→
+   426→  await runMiddleware(mw, req, res);
+   427→  await runMiddleware(guard, req, res);
+   428→
+   429→  assert.strictEqual(res.statusCode, 200);
+   430→});
+   431→
+   432→test('requireFeature handles missing req.subscription gracefully', async () => {
+   433→  const guard = requireFeature('ai');
+   434→  const req = createReq(); // no subscription attached
+   435→  const res = createMockRes();
+   436→
+   437→  await runMiddleware(guard, req, res);
+   438→
+   439→  assert.strictEqual(res.statusCode, 403);
+   440→});
+   441→
+   442→// =========================================================================
+   443→// limitEvents
+   444→// =========================================================================
+   445→
+   446→test('limitEvents does not truncate events below maxEvents', async () => {
+   447→  const store = createSubscriptionStore();
+   448→  const subMw = subscriptionMiddleware(store);
+   449→  const limiter = limitEvents();
+   450→  const req = createReq();
+   451→  const res = createMockRes();
+   452→
+   453→  await runMiddleware(subMw, req, res);
+   454→  await runMiddleware(limiter, req, res);
+   455→
+   456→  // res.json is now patched — call it
+   457→  const data = { events: Array.from({ length: 5 }, (_, i) => ({ id: i })) };
+   458→  res.json(data);
+   459→
+   460→  assert.strictEqual(res.jsonBody.events.length, 5);
+   461→  assert.strictEqual(res.jsonBody._truncated, undefined);
+   462→});
+   463→
+   464→test('limitEvents truncates events to free tier limit of 10', async () => {
+   465→  const store = createSubscriptionStore();
+   466→  const subMw = subscriptionMiddleware(store);
+   467→  const limiter = limitEvents();
+   468→  const req = createReq();
+   469→  const res = createMockRes();
+   470→
+   471→  await runMiddleware(subMw, req, res);
+   472→  await runMiddleware(limiter, req, res);
+   473→
+   474→  const data = { events: Array.from({ length: 25 }, (_, i) => ({ id: i })) };
+   475→  res.json(data);
+   476→
+   477→  assert.strictEqual(res.jsonBody.events.length, 10);
+   478→  assert.strictEqual(res.jsonBody._truncated, true);
+   479→  assert.strictEqual(res.jsonBody._maxEvents, 10);
+   480→});
+   481→
+   482→test('limitEvents does not truncate for premium (unlimited) tier', async () => {
+   483→  const store = createSubscriptionStore();
+   484→  const subMw = subscriptionMiddleware(store);
+   485→  const limiter = limitEvents();
+   486→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   487→  const res = createMockRes();
+   488→
+   489→  await runMiddleware(subMw, req, res);
+   490→  await runMiddleware(limiter, req, res);
+   491→
+   492→  const data = { events: Array.from({ length: 500 }, (_, i) => ({ id: i })) };
+   493→  res.json(data);
+   494→
+   495→  assert.strictEqual(res.jsonBody.events.length, 500);
+   496→  assert.strictEqual(res.jsonBody._truncated, undefined);
+   497→});
+   498→
+   499→test('limitEvents truncates for pro tier at 100 events', async () => {
+   500→  const store = createSubscriptionStore();
+   501→  store.addKey('pro_limit', 'pro', null);
+   502→  const subMw = subscriptionMiddleware(store);
+   503→  const limiter = limitEvents();
+   504→  const req = createReq({ headers: { authorization: 'Bearer pro_limit' } });
+   505→  const res = createMockRes();
+   506→
+   507→  await runMiddleware(subMw, req, res);
+   508→  await runMiddleware(limiter, req, res);
+   509→
+   510→  const data = { events: Array.from({ length: 150 }, (_, i) => ({ id: i })) };
+   511→  res.json(data);
+   512→
+   513→  assert.strictEqual(res.jsonBody.events.length, 100);
+   514→  assert.strictEqual(res.jsonBody._truncated, true);
+   515→});
+   516→
+   517→test('limitEvents does nothing when response has no events array', async () => {
+   518→  const store = createSubscriptionStore();
+   519→  const subMw = subscriptionMiddleware(store);
+   520→  const limiter = limitEvents();
+   521→  const req = createReq();
+   522→  const res = createMockRes();
+   523→
+   524→  await runMiddleware(subMw, req, res);
+   525→  await runMiddleware(limiter, req, res);
+   526→
+   527→  const data = { message: 'ok' };
+   528→  res.json(data);
+   529→
+   530→  assert.strictEqual(res.jsonBody.message, 'ok');
+   531→  assert.strictEqual(res.jsonBody._truncated, undefined);
+   532→});
+   533→
+   534→test('limitEvents preserves other response fields when truncating', async () => {
+   535→  const store = createSubscriptionStore();
+   536→  const subMw = subscriptionMiddleware(store);
+   537→  const limiter = limitEvents();
+   538→  const req = createReq();
+   539→  const res = createMockRes();
+   540→
+   541→  await runMiddleware(subMw, req, res);
+   542→  await runMiddleware(limiter, req, res);
+   543→
+   544→  const data = {
+   545→    total: 25,
+   546→    sport: 'football',
+   547→    events: Array.from({ length: 25 }, (_, i) => ({ id: i })),
+   548→  };
+   549→  res.json(data);
+   550→
+   551→  assert.strictEqual(res.jsonBody.total, 25);
+   552→  assert.strictEqual(res.jsonBody.sport, 'football');
+   553→  assert.strictEqual(res.jsonBody.events.length, 10);
+   554→});
+   555→
+   556→// =========================================================================
+   557→// Integration: full middleware chain
+   558→// =========================================================================
+   559→
+   560→test('Full chain: free user can access scanner but not ai', async () => {
+   561→  const store = createSubscriptionStore();
+   562→  const subMw = subscriptionMiddleware(store);
+   563→  const scannerGuard = requireFeature('scanner');
+   564→  const aiGuard = requireFeature('ai');
+   565→  const req = createReq();
+   566→
+   567→  // Scanner
+   568→  const res1 = createMockRes();
+   569→  await runMiddleware(subMw, req, res1);
+   570→  await runMiddleware(scannerGuard, req, res1);
+   571→  assert.strictEqual(res1.statusCode, 200);
+   572→
+   573→  // AI
+   574→  const res2 = createMockRes();
+   575→  await runMiddleware(aiGuard, req, res2);
+   576→  assert.strictEqual(res2.statusCode, 403);
+   577→});
+   578→
+   579→test('Full chain: premium user can access all features and gets unlimited events', async () => {
+   580→  const store = createSubscriptionStore();
+   581→  const subMw = subscriptionMiddleware(store);
+   582→  const limiter = limitEvents();
+   583→  const aiGuard = requireFeature('ai');
+   584→  const analyticsGuard = requireFeature('analytics');
+   585→  const movementGuard = requireFeature('movement');
+   586→  const req = createReq({ headers: { authorization: `Bearer ${DEMO_PREMIUM_KEY}` } });
+   587→
+   588→  const res1 = createMockRes();
+   589→  await runMiddleware(subMw, req, res1);
+   590→
+   591→  const res2 = createMockRes();
+   592→  await runMiddleware(aiGuard, req, res2);
+   593→  assert.strictEqual(res2.statusCode, 200);
+   594→
+   595→  const res3 = createMockRes();
+   596→  await runMiddleware(analyticsGuard, req, res3);
+   597→  assert.strictEqual(res3.statusCode, 200);
+   598→
+   599→  const res4 = createMockRes();
+   600→  await runMiddleware(movementGuard, req, res4);
+   601→  assert.strictEqual(res4.statusCode, 200);
+   602→
+   603→  // Event limit
+   604→  const res5 = createMockRes();
+   605→  await runMiddleware(limiter, req, res5);
+   606→  const data = { events: Array.from({ length: 1000 }, (_, i) => ({ id: i })) };
+   607→  res5.json(data);
+   608→  assert.strictEqual(res5.jsonBody.events.length, 1000);
+   609→});
+   610→
+   611→// =========================================================================
+   612→// Subscription routes: POST /validate
+   613→// =========================================================================
+   614→
+   615→test('POST /validate returns tier info for valid key', async () => {
+   616→  const store = createSubscriptionStore();
+   617→  const express = require('express');
+   618→  const supertest = require('supertest');
+   619→
+   620→  const app = express();
+   621→  app.use(express.json());
+   622→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   623→
+   624→  const res = await supertest(app)
+   625→    .post('/api/subscription/validate')
+   626→    .send({ key: DEMO_PREMIUM_KEY })
+   627→    .expect('Content-Type', /json/)
+   628→    .expect(200);
+   629→
+   630→  assert.strictEqual(res.body.valid, true);
+   631→  assert.strictEqual(res.body.tier, 'premium');
+   632→  assert.strictEqual(res.body.tierName, 'Premium');
+   633→  assert.strictEqual(res.body.maxEvents, null); // Infinity serializes as null
+   634→  assert.strictEqual(res.body.liveOdds, true);
+   635→  assert.ok(res.body.features.includes('ai'));
+   636→});
+   637→
+   638→test('POST /validate returns 400 for missing key', async () => {
+   639→  const store = createSubscriptionStore();
+   640→  const express = require('express');
+   641→  const supertest = require('supertest');
+   642→
+   643→  const app = express();
+   644→  app.use(express.json());
+   645→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   646→
+   647→  const res = await supertest(app)
+   648→    .post('/api/subscription/validate')
+   649→    .send({})
+   650→    .expect(400);
+   651→
+   652→  assert.ok(res.body.error);
+   653→});
+   654→
+   655→test('POST /validate returns 401 for invalid key', async () => {
+   656→  const store = createSubscriptionStore();
+   657→  const express = require('express');
+   658→  const supertest = require('supertest');
+   659→
+   660→  const app = express();
+   661→  app.use(express.json());
+   662→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   663→
+   664→  const res = await supertest(app)
+   665→    .post('/api/subscription/validate')
+   666→    .send({ key: 'not_a_key' })
+   667→    .expect(401);
+   668→
+   669→  assert.strictEqual(res.body.error, 'Invalid or expired API key');
+   670→});
+   671→
+   672→// =========================================================================
+   673→// Subscription routes: GET /tiers
+   674→// =========================================================================
+   675→
+   676→test('GET /tiers returns all tiers with features', async () => {
+   677→  const store = createSubscriptionStore();
+   678→  const express = require('express');
+   679→  const supertest = require('supertest');
+   680→
+   681→  const app = express();
+   682→  app.use(express.json());
+   683→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   684→
+   685→  const res = await supertest(app)
+   686→    .get('/api/subscription/tiers')
+   687→    .expect(200);
+   688→
+   689→  assert.ok(res.body.tiers.free);
+   690→  assert.ok(res.body.tiers.pro);
+   691→  assert.ok(res.body.tiers.premium);
+   692→  assert.strictEqual(res.body.tiers.free.maxEvents, 10);
+   693→  assert.strictEqual(res.body.tiers.pro.maxEvents, 100);
+   694→  assert.strictEqual(res.body.tiers.premium.maxEvents, null); // Infinity -> null
+   695→});
+   696→
+   697→// =========================================================================
+   698→// Subscription routes: GET /status
+   699→// =========================================================================
+   700→
+   701→test('GET /status returns current subscription from middleware', async () => {
+   702→  const store = createSubscriptionStore();
+   703→  const express = require('express');
+   704→  const { subscriptionMiddleware } = require('../src/subscription');
+   705→  const supertest = require('supertest');
+   706→
+   707→  const app = express();
+   708→  app.use(express.json());
+   709→  app.use(subscriptionMiddleware(store));
+   710→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   711→
+   712→  // Free tier (no key)
+   713→  const resFree = await supertest(app)
+   714→    .get('/api/subscription/status')
+   715→    .expect(200);
+   716→
+   717→  assert.strictEqual(resFree.body.tier, 'free');
+   718→  assert.strictEqual(resFree.body.isPremium, false);
+   719→
+   720→  // Premium tier (demo key)
+   721→  const resPrem = await supertest(app)
+   722→    .get('/api/subscription/status')
+   723→    .set('Authorization', `Bearer ${DEMO_PREMIUM_KEY}`)
+   724→    .expect(200);
+   725→
+   726→  assert.strictEqual(resPrem.body.tier, 'premium');
+   727→  assert.strictEqual(resPrem.body.isPremium, true);
+   728→  assert.strictEqual(resPrem.body.isPro, true);
+   729→  assert.ok(resPrem.body.expiresAt);
+   730→});
+   731→
+   732→test('GET /status returns 500 if middleware not configured', async () => {
+   733→  const store = createSubscriptionStore();
+   734→  const express = require('express');
+   735→  const supertest = require('supertest');
+   736→
+   737→  const app = express();
+   738→  app.use(express.json());
+   739→  // Intentionally NOT mounting subscriptionMiddleware
+   740→  app.use('/api/subscription', createSubscriptionRoutes(store));
+   741→
+   742→  const res = await supertest(app)
+   743→    .get('/api/subscription/status')
+   744→    .expect(500);
+   745→
+   746→  assert.ok(res.body.error);
+   747→});

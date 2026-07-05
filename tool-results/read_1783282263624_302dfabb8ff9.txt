@@ -1,0 +1,903 @@
+     1→const path = require('node:path');
+     2→const fs = require('node:fs');
+     3→const express = require('express');
+     4→const {
+     5→  ROMANIAN_BOOKMAKER_COVERAGE,
+     6→  coverageSummary,
+     7→} = require('./bookmaker-coverage');
+     8→const { getAllOpportunities, getValueBets, describeMarket } = require('./formula-engine');
+     9→const { createLogger } = require('./logger');
+    10→const { BetTracker, VALID_STATUSES } = require('./bet-tracker');
+    11→const { RateLimiter } = require('./rate-limiter');
+    12→const { runAutoSettle, getPendingPicks, readAiPicks } = require('./ai-pick-settler');
+    13→const { allSportOptions, sportCanonical, parseSportList } = require('./sport-config');
+    14→
+    15→const log = createLogger({ level: process.env.LOG_LEVEL || 'info', json: process.env.LOG_JSON === '1' });
+    16→
+    17→const FRONTEND_ROUTES = [
+    18→  '/scanner',
+    19→  '/value',
+    20→  '/ai',
+    21→  '/calculator',
+    22→  '/journal',
+    23→  '/analytics',
+    24→  '/movement',
+    25→  '/bookmakers',
+    26→  '/matches',
+    27→];
+    28→
+    29→const DEFAULT_AI_PICK_LOG_PATH = path.join(__dirname, '..', 'data', 'ai-picks.jsonl');
+    30→const DEFAULT_BET_LOG_PATH = path.join(__dirname, '..', 'data', 'bets.jsonl');
+    31→const DEFAULT_ARB_LOG_PATH = path.join(__dirname, '..', 'data', 'arbs.jsonl');
+    32→
+    33→const AUDIT_ISSUE_METRICS = {
+    34→  invalidOdds: 'odds_audit_invalid_odds',
+    35→  doubleChanceViolations: 'odds_audit_double_chance_violations',
+    36→  drawNoBetViolations: 'odds_audit_draw_no_bet_violations',
+    37→  totalLineMonotonicity: 'odds_audit_total_line_monotonicity',
+    38→  sameBookUnderround: 'odds_audit_same_book_underround',
+    39→  sameBookHighOverround: 'odds_audit_same_book_high_overround',
+    40→  highOdds: 'odds_audit_high_odds',
+    41→};
+    42→
+    43→function createApp({
+    44→  oddsService,
+    45→  liveConfigured,
+    46→  bookmakerCoverage = ROMANIAN_BOOKMAKER_COVERAGE,
+    47→  aiPickLogPath = DEFAULT_AI_PICK_LOG_PATH,
+    48→  betLogPath = DEFAULT_BET_LOG_PATH,
+    49→  arbLogPath = DEFAULT_ARB_LOG_PATH,
+    50→  writeRateLimiter = createWriteRateLimiter(),
+    51→  logger = log,
+    52→  publicDirectory = path.join(__dirname, '..', 'public'),
+    53→}) {
+    54→  const app = express();
+    55→  const frontendHtml = fs.readFileSync(path.join(publicDirectory, 'index.html'), 'utf8');
+    56→  app.disable('x-powered-by');
+    57→  app.use(express.json({ limit: '512kb' }));
+    58→
+    59→  // Security headers
+    60→  app.use((request, response, next) => {
+    61→    response.setHeader('X-Content-Type-Options', 'nosniff');
+    62→    response.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    63→    response.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    64→    response.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    65→    next();
+    66→  });
+    67→
+    68→  // CORS — configurable via env
+    69→  const corsOrigins = process.env.CORS_ORIGINS
+    70→    ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+    71→    : [];
+    72→  if (corsOrigins.length > 0) {
+    73→    app.use((request, response, next) => {
+    74→      const origin = request.headers.origin;
+    75→      if (origin && corsOrigins.includes(origin)) {
+    76→        response.setHeader('Access-Control-Allow-Origin', origin);
+    77→        response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    78→        response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    79→        response.setHeader('Access-Control-Max-Age', '86400');
+    80→      }
+    81→      if (request.method === 'OPTIONS') {
+    82→        response.status(204).end();
+    83→        return;
+    84→      }
+    85→      next();
+    86→    });
+    87→  }
+    88→
+    89→  const betTracker = new BetTracker({ logPath: betLogPath });
+    90→  const checkWriteRateLimit = writeRateLimitMiddleware(writeRateLimiter, logger);
+    91→
+    92→  // Rate-limit ?refresh=1 to protect bookmaker APIs
+    93→  const REFRESH_MIN_INTERVAL_MS = 30_000;
+    94→  let lastRefreshRequestMs = 0;
+    95→
+    96→  app.get('/api/health', (request, response) => {
+    97→    const diagnostics = serviceDiagnostics(oddsService);
+    98→    response.json({
+    99→      status: 'ok',
+   100→      provider: liveConfigured ? 'live' : 'demo',
+   101→      diagnostics,
+   102→    });
+   103→  });
+   104→
+   105→  app.get('/api/readiness', (request, response) => {
+   106→    const diagnostics = serviceDiagnostics(oddsService);
+   107→    const ready = isServiceReady(diagnostics);
+   108→    response.status(ready ? 200 : 503).json({
+   109→      status: ready ? 'ready' : 'warming',
+   110→      reason: readinessReason(diagnostics),
+   111→      diagnostics,
+   112→    });
+   113→  });
+   114→
+   115→  app.get('/api/metrics', (request, response) => {
+   116→    response
+   117→      .type('text/plain; version=0.0.4; charset=utf-8')
+   118→      .send(metricsText(serviceDiagnostics(oddsService)));
+   119→  });
+   120→
+   121→  app.get('/api/bookmakers', (request, response) => {
+   122→    response.json(coverageSummary(bookmakerCoverage));
+   123→  });
+   124→
+   125→  app.post('/api/ai-picks/log', checkWriteRateLimit, (request, response) => {
+   126→    try {
+   127→      const record = aiPickLogRecord(request.body);
+   128→      appendAiPickLog(aiPickLogPath, record);
+   129→      logger.info('AI pick logged', { action: record.action });
+   130→      response.status(201).json({ ok: true, path: aiPickLogPath });
+   131→    } catch (error) {
+   132→      logger.error('Unable to save AI pick log', { error: error.message });
+   133→      response.status(400).json({ error: 'Unable to save AI pick log' });
+   134→    }
+   135→  });
+   136→
+   137→  // ===== AI Pick auto-settlement =====
+   138→  app.get('/api/ai-picks', (request, response) => {
+   139→    try {
+   140→      const picks = readAiPicks(aiPickLogPath);
+   141→      const pending = picks.filter(p => p.action === 'created');
+   142→      const settled = picks.filter(p => p.action === 'settled');
+   143→      response.json({
+   144→        total: picks.length,
+   145→        pending: pending.length,
+   146→        settled: settled.length,
+   147→        picks: picks.slice(-100).reverse(),
+   148→      });
+   149→    } catch (error) {
+   150→      logger.error('Unable to read AI picks', { error: error.message });
+   151→      response.status(500).json({ error: 'Unable to read AI picks' });
+   152→    }
+   153→  });
+   154→
+   155→  app.post('/api/ai-picks/settle', async (request, response) => {
+   156→    try {
+   157→      const data = await oddsService.getOdds();
+   158→      const liveEvents = data.events || [];
+   159→      const previousSnapshot = oddsService.snapshots?.length >= 2
+   160→        ? oddsService.snapshots[oddsService.snapshots.length - 2].events
+   161→        : [];
+   162→      const result = runAutoSettle({
+   163→        logPath: aiPickLogPath,
+   164→        liveEvents,
+   165→        previousEvents: previousSnapshot,
+   166→      });
+   167→      logger.info('AI pick auto-settle ran', {
+   168→        settled: result.settled.length,
+   169→        reviewed: result.reviewed.length,
+   170→        unchanged: result.unchanged.length,
+   171→      });
+   172→      response.json(result);
+   173→    } catch (error) {
+   174→      logger.error('Unable to auto-settle AI picks', { error: error.message });
+   175→      response.status(500).json({ error: 'Unable to auto-settle AI picks' });
+   176→    }
+   177→  });
+   178→
+   179→  // Auto-settle helper (closes over logger, oddsService, aiPickLogPath)
+   180→  let _autoSettleRunning = false;
+   181→  function runBackgroundAutoSettle() {
+   182→    if (_autoSettleRunning) return;
+   183→    _autoSettleRunning = true;
+   184→    setImmediate(() => {
+   185→      try {
+   186→        const data = oddsService.cache?.value;
+   187→        if (!data?.events) { _autoSettleRunning = false; return; }
+   188→        const liveEvents = data.events;
+   189→        const previousSnapshot = oddsService.snapshots?.length >= 2
+   190→          ? oddsService.snapshots[oddsService.snapshots.length - 2].events
+   191→          : [];
+   192→        const result = runAutoSettle({
+   193→          logPath: aiPickLogPath,
+   194→          liveEvents,
+   195→          previousEvents: previousSnapshot,
+   196→        });
+   197→        if (result.settled.length > 0 || result.reviewed.length > 0) {
+   198→          logger.info('Background auto-settle completed', {
+   199→            settled: result.settled.length,
+   200→            reviewed: result.reviewed.length,
+   201→            unchanged: result.unchanged.length,
+   202→          });
+   203→        }
+   204→      } catch (error) {
+   205→        logger.error('Background auto-settle failed', { error: error.message });
+   206→      } finally {
+   207→        _autoSettleRunning = false;
+   208→      }
+   209→    });
+   210→  }
+   211→
+   212→  app.get('/api/odds', async (request, response) => {
+   213→    try {
+   214→      if (request.query.refresh === '1') {
+   215→        const now = Date.now();
+   216→        if (now - lastRefreshRequestMs < REFRESH_MIN_INTERVAL_MS) {
+   217→          response.status(429).json({
+   218→            error: 'Refresh rate limited',
+   219→            retryAfterMs: REFRESH_MIN_INTERVAL_MS - (now - lastRefreshRequestMs),
+   220→          });
+   221→          return;
+   222→        }
+   223→        lastRefreshRequestMs = now;
+   224→        oddsService.clearCache?.();
+   225→        logger.info('Odds refresh requested', { ip: request.ip });
+   226→      }
+   227→
+   228→      const data = await oddsService.getOdds();
+   229→
+   230→      // Sport filter: return only events matching the requested sport
+   231→      const sportFilter = request.query.sport;
+   232→      if (sportFilter) {
+   233→        const canonical = sportCanonical(String(sportFilter).toLowerCase().replace(/\s+/g, ''));
+   234→        const filtered = {
+   235→          ...data,
+   236→          events: (data.events || []).filter(
+   237→            (event) => !event.sport || event.sport === canonical,
+   238→          ),
+   239→        };
+   240→        response.json(filtered);
+   241→      } else {
+   242→        response.json(data);
+   243→      }
+   244→
+   245→      // Auto-settle AI picks in background after each odds refresh
+   246→      runBackgroundAutoSettle();
+   247→    } catch (error) {
+   248→      logger.error('Unable to load odds', { error: error.message });
+   249→      response.status(500).json({ error: 'Unable to load odds' });
+   250→    }
+   251→  });
+   252→
+   253→  app.get('/api/odds/stream', async (request, response) => {
+   254→    try {
+   255→      if (request.query.refresh === '1') {
+   256→        const now = Date.now();
+   257→        if (now - lastRefreshRequestMs < REFRESH_MIN_INTERVAL_MS) {
+   258→          response.status(429).json({
+   259→            error: 'Refresh rate limited',
+   260→            retryAfterMs: REFRESH_MIN_INTERVAL_MS - (now - lastRefreshRequestMs),
+   261→          });
+   262→          return;
+   263→        }
+   264→        lastRefreshRequestMs = now;
+   265→        oddsService.clearCache?.();
+   266→      }
+   267→
+   268→      logger.info('Odds stream started', { ip: request.ip });
+   269→
+   270→      response.writeHead(200, {
+   271→        'content-type': 'application/x-ndjson; charset=utf-8',
+   272→        'cache-control': 'no-cache, no-transform',
+   273→        connection: 'keep-alive',
+   274→      });
+   275→
+   276→      const snapshots = typeof oddsService.streamOdds === 'function'
+   277→        ? oddsService.streamOdds()
+   278→        : [await oddsService.getOdds()];
+   279→
+   280→      for await (const snapshot of snapshots) {
+   281→        if (request.destroyed) {
+   282→          return;
+   283→        }
+   284→        response.write(`${JSON.stringify(snapshot)}\n`);
+   285→      }
+   286→      response.end();
+   287→    } catch (error) {
+   288→      logger.error('Unable to stream odds', { error: error.message });
+   289→      if (!response.headersSent) {
+   290→        response.status(500).json({ error: 'Unable to stream odds' });
+   291→        return;
+   292→      }
+   293→      response.write(`${JSON.stringify({ error: 'Unable to stream odds' })}\n`);
+   294→      response.end();
+   295→    }
+   296→  });
+   297→
+   298→  app.get('/api/odds/movement', (request, response) => {
+   299→    try {
+   300→      const movement = oddsService.getOddsMovement?.();
+   301→      if (!movement) {
+   302→        response.status(503).json({ error: 'Odds movement tracking not available' });
+   303→        return;
+   304→      }
+   305→      response.json(movement);
+   306→    } catch (error) {
+   307→      logger.error('Unable to compute odds movement', { error: error.message });
+   308→      response.status(500).json({ error: 'Unable to compute odds movement' });
+   309→    }
+   310→  });
+   311→
+   312→  app.get('/api/opportunities', async (request, response) => {
+   313→    try {
+   314→      const data = await oddsService.getOdds();
+   315→      const events = data.events || [];
+   316→      let opps = getAllOpportunities(events);
+   317→
+   318→      // Enrich with market descriptions
+   319→      for (const opp of opps) {
+   320→        if (!opp.marketDescription) {
+   321→          opp.marketDescription = describeMarket(opp.marketKey) || null;
+   322→        }
+   323→      }
+   324→
+   325→      const minEdge = Number(request.query.minEdge) || 0;
+   326→      const profitOnly = request.query.profitOnly === '1';
+   327→      const trustedOnly = request.query.trustedOnly === '1';
+   328→      const limit = Number(request.query.limit) || undefined;
+   329→
+   330→      if (profitOnly) opps = opps.filter((o) => o.profit > 0);
+   331→      if (trustedOnly) opps = opps.filter((o) => o.confidence === 'trusted');
+   332→      if (minEdge > 0) opps = opps.filter((o) => o.edge * 100 >= minEdge);
+   333→
+   334→      const sort = request.query.sort || 'edge';
+   335→      switch (sort) {
+   336→        case 'profit':
+   337→          opps.sort((a, b) => b.profit - a.profit);
+   338→          break;
+   339→        case 'confidence':
+   340→          opps.sort((a, b) => {
+   341→            const order = { high: 4, trusted: 3, review: 2, risky: 1 };
+   342→            return (order[b.confidence] || 0) - (order[a.confidence] || 0);
+   343→          });
+   344→          break;
+   345→        default:
+   346→          opps.sort((a, b) => b.edge - a.edge);
+   347→      }
+   348→
+   349→      response.json({
+   350→        opportunities: opps.slice(0, limit),
+   351→        total: opps.length,
+   352→        fetchedAt: data.fetchedAt,
+   353→      });
+   354→    } catch (error) {
+   355→      logger.error('Unable to compute opportunities', { error: error.message });
+   356→      response.status(500).json({ error: 'Unable to compute opportunities' });
+   357→    }
+   358→  });
+   359→
+   360→  // ===== Arb history =====
+   361→  app.post('/api/arbs/log', checkWriteRateLimit, (request, response) => {
+   362→    try {
+   363→      const body = request.body || {};
+   364→      if (!Array.isArray(body.opportunities) || body.opportunities.length === 0) {
+   365→        response.status(400).json({ error: 'Missing opportunities array' });
+   366→        return;
+   367→      }
+   368→      const record = {
+   369→        loggedAt: new Date().toISOString(),
+   370→        count: body.opportunities.length,
+   371→        opportunities: body.opportunities.map((opp) => ({
+   372→          eventName: opp.eventName || '',
+   373→          marketKey: opp.marketKey || '',
+   374→          marketLabel: opp.marketLabel || '',
+   375→          edge: Number(opp.edge) || 0,
+   376→          profit: Number(opp.profit) || 0,
+   377→          confidence: opp.confidence || '',
+   378→          competition: opp.competition || '',
+   379→          legs: (opp.legs || []).map((leg) => ({
+   380→            outcome: leg.outcome || '',
+   381→            label: leg.label || '',
+   382→            bookmaker: leg.bookmaker || '',
+   383→            price: Number(leg.price) || 0,
+   384→          })),
+   385→        })),
+   386→      };
+   387→      fs.mkdirSync(path.dirname(arbLogPath), { recursive: true });
+   388→      fs.appendFileSync(arbLogPath, `${JSON.stringify(record)}\n`, 'utf8');
+   389→      response.status(201).json({ ok: true, count: record.count });
+   390→    } catch (error) {
+   391→      logger.error('Unable to save arb history', { error: error.message });
+   392→      response.status(500).json({ error: 'Unable to save arb history' });
+   393→    }
+   394→  });
+   395→
+   396→  app.get('/api/arbs', (request, response) => {
+   397→    try {
+   398→      if (!fs.existsSync(arbLogPath)) {
+   399→        response.json({ records: [], total: 0 });
+   400→        return;
+   401→      }
+   402→      const limit = Number(request.query.limit) || 100;
+   403→      const lines = fs.readFileSync(arbLogPath, 'utf8').split('\n').filter(Boolean);
+   404→      const records = [];
+   405→      for (const line of lines) {
+   406→        try { records.push(JSON.parse(line)); } catch { /* skip */ }
+   407→      }
+   408→      records.reverse();
+   409→      response.json({
+   410→        records: records.slice(0, limit),
+   411→        total: records.length,
+   412→      });
+   413→    } catch (error) {
+   414→      logger.error('Unable to fetch arb history', { error: error.message });
+   415→      response.status(500).json({ error: 'Unable to fetch arb history' });
+   416→    }
+   417→  });
+   418→
+   419→  app.get('/api/value-bets', async (request, response) => {
+   420→    try {
+   421→      const data = await oddsService.getOdds();
+   422→      const events = data.events || [];
+   423→      const limit = Number(request.query.limit) || 30;
+   424→      const bets = getValueBets(events, limit);
+   425→
+   426→      response.json({
+   427→        valueBets: bets,
+   428→        total: bets.length,
+   429→        fetchedAt: data.fetchedAt,
+   430→      });
+   431→    } catch (error) {
+   432→      logger.error('Unable to compute value bets', { error: error.message });
+   433→      response.status(500).json({ error: 'Unable to compute value bets' });
+   434→    }
+   435→  });
+   436→
+   437→  // ===== Sport configuration =====
+   438→  app.get('/api/sports', (request, response) => {
+   439→    response.json({
+   440→      sports: allSportOptions(),
+   441→      defaultSport: 'football',
+   442→    });
+   443→  });
+   444→
+   445→  // ===== Bet tracker =====
+   446→  app.get('/api/bets', (request, response) => {
+   447→    try {
+   448→      const bets = betTracker.query({
+   449→        status: request.query.status || undefined,
+   450→        sport: request.query.sport || undefined,
+   451→        bookmaker: request.query.bookmaker || undefined,
+   452→        market: request.query.market || undefined,
+   453→        type: request.query.type || undefined,
+   454→        limit: request.query.limit ? Number(request.query.limit) : undefined,
+   455→      });
+   456→      response.json({ bets, total: bets.length });
+   457→    } catch (error) {
+   458→      logger.error('Unable to fetch bets', { error: error.message });
+   459→      response.status(500).json({ error: 'Unable to fetch bets' });
+   460→    }
+   461→  });
+   462→
+   463→  app.post('/api/bets', checkWriteRateLimit, (request, response) => {
+   464→    try {
+   465→      const input = validateBetInput(request.body || {});
+   466→      const bet = betTracker.create({
+   467→        ...input,
+   468→        id: undefined,
+   469→        loggedAt: undefined,
+   470→        result: null,
+   471→        settledAt: null,
+   472→        status: 'pending',
+   473→      });
+   474→      logger.info('Bet created', { id: bet.id });
+   475→      response.status(201).json(bet);
+   476→    } catch (error) {
+   477→      logger.error('Unable to create bet', { error: error.message });
+   478→      response.status(400).json({ error: error.message });
+   479→    }
+   480→  });
+   481→
+   482→  app.post('/api/bets/import', checkWriteRateLimit, (request, response) => {
+   483→    try {
+   484→      const records = betImportRecords(request.body || {});
+   485→      if (records.length === 0) {
+   486→        response.status(400).json({ error: 'No importable bets found' });
+   487→        return;
+   488→      }
+   489→      if (records.length > 1000) {
+   490→        response.status(400).json({ error: 'Import is limited to 1000 bets at a time' });
+   491→        return;
+   492→      }
+   493→
+   494→      const existingIds = new Set(betTracker.readAll().map((bet) => bet.id).filter(Boolean));
+   495→      const importIds = new Set();
+   496→      const created = records.map((record) => {
+   497→        if (!record.id || existingIds.has(record.id) || importIds.has(record.id)) {
+   498→          delete record.id;
+   499→        } else {
+   500→          importIds.add(record.id);
+   501→        }
+   502→        return betTracker.create(record);
+   503→      });
+   504→      const annotated = betTracker.refreshTaxFields();
+   505→      const createdIds = new Set(created.map((bet) => bet.id));
+   506→      const importedBets = annotated.filter((bet) => createdIds.has(bet.id));
+   507→      logger.info('Bets imported', { count: importedBets.length });
+   508→      response.status(201).json({
+   509→        ok: true,
+   510→        imported: importedBets.length,
+   511→        total: annotated.length,
+   512→        bets: importedBets,
+   513→      });
+   514→    } catch (error) {
+   515→      logger.error('Unable to import bets', { error: error.message });
+   516→      response.status(400).json({ error: error.message });
+   517→    }
+   518→  });
+   519→
+   520→  app.post('/api/bets/:id/settle', checkWriteRateLimit, (request, response) => {
+   521→    try {
+   522→      const result = String(request.body?.result || '').trim();
+   523→      const closingOdds = request.body?.closingOdds;
+   524→      const notes = request.body?.notes;
+   525→      const bet = betTracker.settle(request.params.id, result, { closingOdds, notes });
+   526→      logger.info('Bet settled', { id: bet.id, result: bet.result });
+   527→      response.json(bet);
+   528→    } catch (error) {
+   529→      logger.error('Unable to settle bet', { error: error.message });
+   530→      const status = error.message.includes('not found') ? 404 : 400;
+   531→      response.status(status).json({ error: error.message });
+   532→    }
+   533→  });
+   534→
+   535→  app.patch('/api/bets/:id', checkWriteRateLimit, (request, response) => {
+   536→    try {
+   537→      const bet = betTracker.update(request.params.id, request.body || {});
+   538→      response.json(bet);
+   539→    } catch (error) {
+   540→      logger.error('Unable to update bet', { error: error.message });
+   541→      const status = error.message.includes('not found') ? 404 : 400;
+   542→      response.status(status).json({ error: error.message });
+   543→    }
+   544→  });
+   545→
+   546→  app.delete('/api/bets/:id', checkWriteRateLimit, (request, response) => {
+   547→    try {
+   548→      const removed = betTracker.remove(request.params.id);
+   549→      if (!removed) {
+   550→        response.status(404).json({ error: 'Bet not found' });
+   551→        return;
+   552→      }
+   553→      response.json({ ok: true });
+   554→    } catch (error) {
+   555→      logger.error('Unable to delete bet', { error: error.message });
+   556→      response.status(500).json({ error: 'Unable to delete bet' });
+   557→    }
+   558→  });
+   559→
+   560→  app.get('/api/bets/analytics', (request, response) => {
+   561→    try {
+   562→      const analytics = betTracker.analytics({
+   563→        sport: request.query.sport || undefined,
+   564→      });
+   565→      response.json(analytics);
+   566→    } catch (error) {
+   567→      logger.error('Unable to compute bet analytics', { error: error.message });
+   568→      response.status(500).json({ error: 'Unable to compute analytics' });
+   569→    }
+   570→  });
+   571→
+   572→  app.use(express.static(publicDirectory));
+   573→
+   574→  app.use('/api', (request, response) => {
+   575→    response.status(404).json({ error: 'API route not found' });
+   576→  });
+   577→
+   578→  app.get(FRONTEND_ROUTES, (request, response) => {
+   579→    response.type('html').send(frontendHtml);
+   580→  });
+   581→
+   582→  return app;
+   583→}
+   584→
+   585→function serviceDiagnostics(oddsService) {
+   586→  return typeof oddsService.diagnostics === 'function'
+   587→    ? oddsService.diagnostics()
+   588→    : null;
+   589→}
+   590→
+   591→function isServiceReady(diagnostics) {
+   592→  if (!diagnostics) {
+   593→    return true;
+   594→  }
+   595→  return Boolean(
+   596→    diagnostics.inFlight ||
+   597→    diagnostics.cache?.fresh ||
+   598→    diagnostics.lastRefresh?.events > 0,
+   599→  );
+   600→}
+   601→
+   602→function readinessReason(diagnostics) {
+   603→  if (!diagnostics) {
+   604→    return 'diagnostics unavailable';
+   605→  }
+   606→  if (diagnostics.inFlight) {
+   607→    return 'odds refresh in progress';
+   608→  }
+   609→  if (diagnostics.cache?.fresh) {
+   610→    return 'fresh odds cache available';
+   611→  }
+   612→  if (diagnostics.lastRefresh?.events > 0) {
+   613→    return 'last refresh has usable events';
+   614→  }
+   615→  return 'waiting for first odds refresh';
+   616→}
+   617→
+   618→function metricsText(diagnostics) {
+   619→  const auditIssueMetrics = auditIssueCountMetrics(diagnostics?.lastRefresh?.audit?.issueCounts);
+   620→  const metrics = {
+   621→    odds_ready: isServiceReady(diagnostics) ? 1 : 0,
+   622→    odds_cache_fresh: diagnostics?.cache?.fresh ? 1 : 0,
+   623→    odds_cache_age_ms: numericMetric(diagnostics?.cache?.ageMs),
+   624→    odds_cache_expires_in_ms: numericMetric(diagnostics?.cache?.expiresInMs),
+   625→    odds_refresh_in_flight: diagnostics?.inFlight ? 1 : 0,
+   626→    odds_last_refresh_events: numericMetric(diagnostics?.lastRefresh?.events),
+   627→    odds_last_refresh_providers: numericMetric(diagnostics?.lastRefresh?.providers),
+   628→    odds_last_refresh_failed_providers: numericMetric(diagnostics?.lastRefresh?.failedProviders),
+   629→    odds_last_refresh_duration_ms: numericMetric(diagnostics?.lastRefresh?.durationMs),
+   630→    odds_last_refresh_live: diagnostics?.lastRefresh?.status === 'live' ? 1 : 0,
+   631→    odds_last_refresh_fallback: diagnostics?.lastRefresh?.status === 'fallback' ? 1 : 0,
+   632→    odds_last_refresh_error: diagnostics?.lastRefresh?.status === 'error' ? 1 : 0,
+   633→    odds_audit_warning: diagnostics?.lastRefresh?.audit?.status === 'warning' ? 1 : 0,
+   634→    odds_audit_review: diagnostics?.lastRefresh?.audit?.status === 'review' ? 1 : 0,
+   635→    odds_audit_issues_total: Object.values(auditIssueMetrics)
+   636→      .reduce((total, value) => total + value, 0),
+   637→    ...auditIssueMetrics,
+   638→  };
+   639→  const scalarLines = Object.entries(metrics)
+   640→    .map(([key, value]) => `${key} ${value}`);
+   641→  const providerLines = providerTimingMetricLines(diagnostics?.lastRefresh?.slowProviders);
+   642→
+   643→  return `${[
+   644→    ...scalarLines,
+   645→    ...providerLines,
+   646→  ].join('\n')}\n`;
+   647→}
+   648→
+   649→function auditIssueCountMetrics(issueCounts = {}) {
+   650→  return Object.fromEntries(
+   651→    Object.entries(AUDIT_ISSUE_METRICS).map(([issueKey, metricKey]) => [
+   652→      metricKey,
+   653→      numericMetric(issueCounts?.[issueKey]),
+   654→    ]),
+   655→  );
+   656→}
+   657→
+   658→function numericMetric(value) {
+   659→  const number = Number(value);
+   660→  return Number.isFinite(number) ? number : 0;
+   661→}
+   662→
+   663→function aiPickLogRecord(body = {}) {
+   664→  const action = String(body.action || '').trim();
+   665→  if (!['created', 'settled'].includes(action)) {
+   666→    throw new Error('Unsupported AI pick log action');
+   667→  }
+   668→  if (!body.entry || typeof body.entry !== 'object') {
+   669→    throw new Error('Missing AI pick log entry');
+   670→  }
+   671→
+   672→  const entry = {
+   673→    ...body.entry,
+   674→    id: body.entry.id || `pick_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+   675→    loggedAt: body.entry.loggedAt || new Date().toISOString(),
+   676→  };
+   677→
+   678→  return {
+   679→    loggedAt: new Date().toISOString(),
+   680→    action,
+   681→    entry,
+   682→  };
+   683→}
+   684→
+   685→function appendAiPickLog(logPath, record) {
+   686→  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+   687→  fs.appendFileSync(logPath, `${JSON.stringify(record)}\n`, 'utf8');
+   688→}
+   689→
+   690→function createWriteRateLimiter() {
+   691→  return new RateLimiter({
+   692→    windowMs: positiveInteger(process.env.WRITE_RATE_LIMIT_WINDOW_MS, 60_000),
+   693→    maxRequests: positiveInteger(process.env.WRITE_RATE_LIMIT_MAX, 60),
+   694→  });
+   695→}
+   696→
+   697→function writeRateLimitMiddleware(rateLimiter, logger) {
+   698→  return (request, response, next) => {
+   699→    if (!rateLimiter || typeof rateLimiter.check !== 'function') {
+   700→      next();
+   701→      return;
+   702→    }
+   703→
+   704→    const result = rateLimiter.check(request.ip || request.socket?.remoteAddress);
+   705→    if (result.allowed) {
+   706→      next();
+   707→      return;
+   708→    }
+   709→
+   710→    const retryAfterMs = result.retryAfterMs || 1000;
+   711→    response.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+   712→    logger.warn('Write API rate limited', {
+   713→      ip: request.ip,
+   714→      path: request.path,
+   715→      retryAfterMs,
+   716→    });
+   717→    response.status(429).json({
+   718→      error: 'Write rate limited',
+   719→      retryAfterMs,
+   720→    });
+   721→  };
+   722→}
+   723→
+   724→function positiveInteger(value, fallback) {
+   725→  const number = Number(value);
+   726→  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+   727→}
+   728→
+   729→function betImportRecords(body) {
+   730→  const rows = Array.isArray(body.bets)
+   731→    ? body.bets
+   732→    : typeof body.csv === 'string'
+   733→      ? parseCsvObjects(body.csv)
+   734→      : [];
+   735→
+   736→  return rows
+   737→    .filter((row) => row && typeof row === 'object')
+   738→    .map((row, index) => importRowToBet(row, index));
+   739→}
+   740→
+   741→function importRowToBet(row, index) {
+   742→  const loggedAt = normalizeImportDate(fieldValue(row, ['Saved', 'LoggedAt', 'loggedAt', 'timestamp']));
+   743→  const status = normalizeImportStatus(fieldValue(row, ['Status', 'status'])) || 'pending';
+   744→  const settledAt =
+   745→    normalizeImportDate(fieldValue(row, ['Settled', 'SettledAt', 'settledAt'])) ||
+   746→    (status === 'pending' ? null : loggedAt);
+   747→  const input = {
+   748→    id: cleanImportValue(fieldValue(row, ['ID', 'Id', 'id'])),
+   749→    event: fieldValue(row, ['Event', 'event', 'Match', 'match']),
+   750→    sport: fieldValue(row, ['Sport', 'sport']) || 'Football',
+   751→    competition: fieldValue(row, ['Competition', 'competition']),
+   752→    market: fieldValue(row, ['Market', 'market']),
+   753→    selection: fieldValue(row, ['Selection', 'selection']),
+   754→    bookmaker: fieldValue(row, ['Bookmaker', 'bookmaker']),
+   755→    odds: fieldValue(row, ['Odds', 'odds']),
+   756→    stake: fieldValue(row, ['Stake', 'stake']),
+   757→    status,
+   758→    type: fieldValue(row, ['Type', 'type']) || 'manual-import',
+   759→    notes: fieldValue(row, ['Notes', 'notes']),
+   760→    closingOdds: fieldValue(row, ['ClosingOdds', 'closingOdds', 'Closing odds']),
+   761→    loggedAt,
+   762→    settledAt,
+   763→    result: status === 'pending' ? null : status,
+   764→  };
+   765→
+   766→  try {
+   767→    return validateBetInput(input);
+   768→  } catch (error) {
+   769→    throw new Error(`Row ${index + 1}: ${error.message}`);
+   770→  }
+   771→}
+   772→
+   773→function normalizeImportStatus(value) {
+   774→  const status = String(value || '').trim().toLowerCase();
+   775→  return VALID_STATUSES.includes(status) ? status : null;
+   776→}
+   777→
+   778→function normalizeImportDate(value) {
+   779→  const text = cleanImportValue(value);
+   780→  if (!text) return null;
+   781→  const date = new Date(text);
+   782→  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+   783→}
+   784→
+   785→function fieldValue(row, names) {
+   786→  for (const name of names) {
+   787→    if (row[name] !== undefined && row[name] !== null && row[name] !== '') {
+   788→      return row[name];
+   789→    }
+   790→  }
+   791→  const lowerMap = Object.fromEntries(
+   792→    Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]),
+   793→  );
+   794→  for (const name of names) {
+   795→    const value = lowerMap[name.toLowerCase()];
+   796→    if (value !== undefined && value !== null && value !== '') return value;
+   797→  }
+   798→  return '';
+   799→}
+   800→
+   801→function cleanImportValue(value) {
+   802→  return String(value ?? '').trim();
+   803→}
+   804→
+   805→function parseCsvObjects(text) {
+   806→  const rows = parseCsvRows(String(text || '').replace(/^\uFEFF/, ''));
+   807→  if (rows.length === 0) return [];
+   808→  const headers = rows[0].map((header) => cleanImportValue(header));
+   809→  if (headers.every((header) => !header)) return [];
+   810→
+   811→  return rows.slice(1)
+   812→    .filter((row) => row.some((value) => cleanImportValue(value)))
+   813→    .map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
+   814→}
+   815→
+   816→function parseCsvRows(text) {
+   817→  const rows = [];
+   818→  let row = [];
+   819→  let field = '';
+   820→  let inQuotes = false;
+   821→
+   822→  for (let index = 0; index < text.length; index++) {
+   823→    const char = text[index];
+   824→    if (inQuotes) {
+   825→      if (char === '"' && text[index + 1] === '"') {
+   826→        field += '"';
+   827→        index += 1;
+   828→      } else if (char === '"') {
+   829→        inQuotes = false;
+   830→      } else {
+   831→        field += char;
+   832→      }
+   833→      continue;
+   834→    }
+   835→
+   836→    if (char === '"') {
+   837→      inQuotes = true;
+   838→    } else if (char === ',') {
+   839→      row.push(field);
+   840→      field = '';
+   841→    } else if (char === '\n') {
+   842→      row.push(field);
+   843→      rows.push(row);
+   844→      row = [];
+   845→      field = '';
+   846→    } else if (char !== '\r') {
+   847→      field += char;
+   848→    }
+   849→  }
+   850→
+   851→  if (field || row.length > 0) {
+   852→    row.push(field);
+   853→    rows.push(row);
+   854→  }
+   855→  return rows;
+   856→}
+   857→
+   858→function providerTimingMetricLines(providers = []) {
+   859→  if (!Array.isArray(providers)) {
+   860→    return [];
+   861→  }
+   862→
+   863→  return providers
+   864→    .filter((provider) => provider?.name)
+   865→    .flatMap((provider) => {
+   866→      const label = `name="${escapeMetricLabel(provider.name)}"`;
+   867→      return [
+   868→        `odds_slow_provider_duration_ms{${label}} ${numericMetric(provider.durationMs)}`,
+   869→        `odds_slow_provider_events{${label}} ${numericMetric(provider.events)}`,
+   870→        `odds_slow_provider_ok{${label}} ${provider.ok ? 1 : 0}`,
+   871→      ];
+   872→    });
+   873→}
+   874→
+   875→function escapeMetricLabel(value) {
+   876→  return String(value)
+   877→    .replace(/\\/g, '\\\\')
+   878→    .replace(/\n/g, '\\n')
+   879→    .replace(/"/g, '\\"');
+   880→}
+   881→
+   882→function validateBetInput(input) {
+   883→  const errors = [];
+   884→  const event = String(input.event || '').trim();
+   885→  const odds = Number(input.odds);
+   886→  const stake = Number(input.stake);
+   887→
+   888→  if (!event) errors.push('event is required');
+   889→  if (!Number.isFinite(odds) || odds <= 1) errors.push('odds must be a number greater than 1');
+   890→  if (!Number.isFinite(stake) || stake < 0) errors.push('stake must be a non-negative number');
+   891→  if (stake > 1_000_000) errors.push('stake seems unreasonably large');
+   892→
+   893→  if (errors.length > 0) {
+   894→    throw new Error(errors.join('; '));
+   895→  }
+   896→
+   897→  return { ...input, event, odds, stake };
+   898→}
+   899→
+   900→module.exports = { createApp };
+   901→
+   902→module.exports = { createApp };
+   903→

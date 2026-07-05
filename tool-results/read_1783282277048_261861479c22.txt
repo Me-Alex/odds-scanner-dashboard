@@ -1,0 +1,1135 @@
+     1→/**
+     2→ * Server-side formula engine — extracted from public/app.js.
+     3→ *
+     4→ * Computes arbitrage opportunities and value bets from normalized odds events.
+     5→ * Exposed via GET /api/opportunities and GET /api/value-bets.
+     6→ */
+     7→
+     8→'use strict';
+     9→
+    10→const { marketOutcomes: sportMarketOutcomes } = require('./sport-config');
+    11→
+    12→
+    13→const MIN_VALUE_EDGE = 0.025;
+    14→
+    15→/** Bookmakers considered sharp reference lines. Used as the "fair" price
+    16→ * for value bet calculations, falling back to trimmed-mean consensus. */
+    17→const SHARP_BOOKMAKER_NAMES = new Set([
+    18→  'pinnacle', 'Pinnacle',
+    19→  'betfair', 'Betfair', 'Betfair Exchange',
+    20→]);
+    21→
+    22→/** Maximum edge for classic arbitrage — anything above is almost certainly a data error. */
+    23→const MAX_ARB_EDGE = 0.25;
+    24→
+    25→/** Expected outcomes for known market types. Used to reject incomplete markets. */
+    26→const MARKET_OUTCOMES = {
+    27→  // 3-way markets
+    28→  h2h: ['home', 'draw', 'away'],
+    29→  firstHalfH2h: ['home', 'draw', 'away'],
+    30→  secondHalfH2h: ['home', 'draw', 'away'],
+    31→  halfTimeOrFullTime: ['home', 'draw', 'away'],
+    32→  // 2-way markets
+    33→  bothTeamsToScore: ['yes', 'no'],
+    34→  drawNoBet: ['home', 'away'],
+    35→  firstHalfDrawNoBet: ['home', 'away'],
+    36→  secondHalfDrawNoBet: ['home', 'away'],
+    37→  // Double chance — 3 mutually exhaustive outcomes
+    38→  doubleChance: ['homeDraw', 'homeAway', 'drawAway'],
+    39→};
+    40→
+    41→const MARKET_LABELS = {
+    42→  h2h: '1X2',
+    43→  firstHalfH2h: '1st Half 1X2',
+    44→  secondHalfH2h: '2nd Half 1X2',
+    45→  doubleChance: 'Double Chance',
+    46→  bothTeamsToScore: 'BTTS',
+    47→  drawNoBet: 'Draw No Bet',
+    48→  firstHalfDrawNoBet: '1st Half DNB',
+    49→  secondHalfDrawNoBet: '2nd Half DNB',
+    50→  toQualify: 'To Qualify',
+    51→  halfTimeOrFullTime: 'HT/FT',
+    52→};
+    53→
+    54→const MARKET_DESCRIPTIONS = {
+    55→  h2h: 'Match result — Home / Draw / Away',
+    56→  firstHalfH2h: 'Result at half-time — Home / Draw / Away',
+    57→  secondHalfH2h: 'Result in second half — Home / Draw / Away',
+    58→  doubleChance: 'Two of three outcomes — 1X / 12 / X2',
+    59→  bothTeamsToScore: 'Will both teams score at least one goal?',
+    60→  drawNoBet: 'Home or Away wins; stake refunded on a draw',
+    61→  firstHalfDrawNoBet: 'Half-time DNB — stake refunded if level at HT',
+    62→  secondHalfDrawNoBet: 'Second-half DNB — stake refunded if level at 2nd half',
+    63→  toQualify: 'Which team advances to the next round',
+    64→  halfTimeOrFullTime: 'Predict result at half-time AND full-time',
+    65→};
+    66→
+    67→const LINE_MARKET_FAMILIES = [
+    68→  { prefix: 'firstHalfAsianTotalGoals', label: '1st Half Asian Goals', description: 'Asian Over/Under goals in first half' },
+    69→  { prefix: 'secondHalfAsianTotalGoals', label: '2nd Half Asian Goals', description: 'Asian Over/Under goals in second half' },
+    70→  { prefix: 'asianTotalGoals', label: 'Asian Goals', description: 'Asian Over/Under total match goals' },
+    71→  { prefix: 'firstHalfAsianTotalCorners', label: '1st Half Asian Corners', description: 'Asian Over/Under corners in first half' },
+    72→  { prefix: 'secondHalfAsianTotalCorners', label: '2nd Half Asian Corners', description: 'Asian Over/Under corners in second half' },
+    73→  { prefix: 'asianTotalCorners', label: 'Asian Corners', description: 'Asian Over/Under total match corners' },
+    74→  { prefix: 'firstHalfAsianTotalCards', label: '1st Half Asian Cards', description: 'Asian Over/Under cards in first half' },
+    75→  { prefix: 'secondHalfAsianTotalCards', label: '2nd Half Asian Cards', description: 'Asian Over/Under cards in second half' },
+    76→  { prefix: 'asianTotalCards', label: 'Asian Cards', description: 'Asian Over/Under total match cards' },
+    77→  { prefix: 'firstHalfTotalGoals', label: '1st Half Goals', description: 'Over/Under goals in first half' },
+    78→  { prefix: 'secondHalfTotalGoals', label: '2nd Half Goals', description: 'Over/Under goals in second half' },
+    79→  { prefix: 'totalGoals', label: 'Goals', description: 'Over/Under total match goals' },
+    80→  { prefix: 'firstHalfTotalCorners', label: '1st Half Corners', description: 'Over/Under corners in first half' },
+    81→  { prefix: 'secondHalfTotalCorners', label: '2nd Half Corners', description: 'Over/Under corners in second half' },
+    82→  { prefix: 'totalCorners', label: 'Corners', description: 'Over/Under total match corners' },
+    83→  { prefix: 'firstHalfTotalCards', label: '1st Half Cards', description: 'Over/Under cards in first half' },
+    84→  { prefix: 'secondHalfTotalCards', label: '2nd Half Cards', description: 'Over/Under cards in second half' },
+    85→  { prefix: 'totalCards', label: 'Cards', description: 'Over/Under total match cards' },
+    86→];
+    87→
+    88→const OUTCOME_LABELS = {
+    89→  home: '1',
+    90→  draw: 'X',
+    91→  away: '2',
+    92→  homeAway: '12',
+    93→  homeDraw: '1X',
+    94→  drawAway: 'X2',
+    95→  yes: 'Yes',
+    96→  no: 'No',
+    97→  over: 'Over',
+    98→  under: 'Under',
+    99→};
+   100→
+   101→const RESULT_MARKET_KEY_RE = /(?:^|_)(?:result|rezultat|1x2)(?:_|$)/;
+   102→const NON_THREE_WAY_RESULT_KEY_RE = /(?:doublechance|double_chance|drawnobet|draw_no_bet|dnb|halftimeorfulltime|half_time_or_full_time|ht_ft)/;
+   103→const BUCKET_OUTCOME_KEY_RE = /^(?:\d+(?:minus|plus)\d+|\d+(?:plus|_plus)|\d+_?\d*min(?:us)?\d*|\d+_to_\d+|\d+_or_more)$/;
+   104→
+   105→function formatLineFromKey(key) {
+   106→  const m = String(key).match(/_(\d+)_(\d+)?$/);
+   107→  if (!m) {
+   108→    const m2 = String(key).match(/_(\d+)$/);
+   109→    if (m2) return m2[1];
+   110→    return null;
+   111→  }
+   112→  return m[2] ? `${m[1]}.${m[2]}` : m[1];
+   113→}
+   114→
+   115→function parseLineNumberFromKey(key) {
+   116→  const line = formatLineFromKey(key);
+   117→  if (!line) return null;
+   118→  const number = Number(line);
+   119→  return Number.isFinite(number) ? number : null;
+   120→}
+   121→
+   122→function lineMarketFamilyForKey(key) {
+   123→  const normalized = String(key || '').replace(/_\d+(?:_\d+)?$/, '');
+   124→  return LINE_MARKET_FAMILIES.find((family) => normalized === family.prefix) || null;
+   125→}
+   126→
+   127→function getLineMarketFamilyLabel(key) {
+   128→  return lineMarketFamilyForKey(key)?.label || null;
+   129→}
+   130→
+   131→function getLineMarketFamilyDescription(key) {
+   132→  return lineMarketFamilyForKey(key)?.description || null;
+   133→}
+   134→
+   135→function formatMiddleLegLabel(outcome, line, familyLabel) {
+   136→  const outcomeLabel = getOutcomeLabel(outcome);
+   137→  return familyLabel ? `${outcomeLabel} ${line} ${familyLabel}` : `${outcomeLabel} ${line}`;
+   138→}
+   139→
+   140→function formatHandicapLine(key) {
+   141→  const m = String(key).match(/(?:asian)?[Hh]andicap_(plus|minus)_(\d+)(?:_(\d+))?$/);
+   142→  if (!m) return null;
+   143→  const sign = m[1] === 'plus' ? '+' : '-';
+   144→  const line = m[3] ? `${m[2]}.${m[3]}` : m[2];
+   145→  return `${sign}${line}`;
+   146→}
+   147→
+   148→function getMarketLabel(key) {
+   149→  if (MARKET_LABELS[key]) return MARKET_LABELS[key];
+   150→
+   151→  const k = String(key);
+   152→
+   153→  // Asian handicap: asianHandicap_plus_0_5 → AH +0.5
+   154→  const ah = formatHandicapLine(k);
+   155→  if (ah && k.startsWith('asianHandicap')) return `AH ${ah}`;
+   156→  if (ah && k.startsWith('handicap')) return `Handicap ${ah}`;
+   157→
+   158→  // Total goals with line: totalGoals_2_5 → O/U 2.5 Goals
+   159→  if (/^totalGoals_/.test(k)) {
+   160→    const line = formatLineFromKey(k);
+   161→    return line ? `O/U ${line} Goals` : 'Total Goals';
+   162→  }
+   163→  if (/^firstHalfTotalGoals_/.test(k)) {
+   164→    const line = formatLineFromKey(k);
+   165→    return line ? `1H O/U ${line} Goals` : '1st Half Total Goals';
+   166→  }
+   167→  if (/^secondHalfTotalGoals_/.test(k)) {
+   168→    const line = formatLineFromKey(k);
+   169→    return line ? `2H O/U ${line} Goals` : '2nd Half Total Goals';
+   170→  }
+   171→  if (/^totalCorners_/.test(k)) {
+   172→    const line = formatLineFromKey(k);
+   173→    return line ? `O/U ${line} Corners` : 'Total Corners';
+   174→  }
+   175→  if (/^firstHalfTotalCorners_/.test(k)) {
+   176→    const line = formatLineFromKey(k);
+   177→    return line ? `1H O/U ${line} Corners` : '1st Half Corners';
+   178→  }
+   179→  if (/^secondHalfTotalCorners_/.test(k)) {
+   180→    const line = formatLineFromKey(k);
+   181→    return line ? `2H O/U ${line} Corners` : '2nd Half Corners';
+   182→  }
+   183→  if (/^totalCards_/.test(k)) {
+   184→    const line = formatLineFromKey(k);
+   185→    return line ? `O/U ${line} Cards` : 'Total Cards';
+   186→  }
+   187→  if (/^firstHalfTotalCards_/.test(k)) {
+   188→    const line = formatLineFromKey(k);
+   189→    return line ? `1H O/U ${line} Cards` : '1st Half Cards';
+   190→  }
+   191→  if (/^secondHalfTotalCards_/.test(k)) {
+   192→    const line = formatLineFromKey(k);
+   193→    return line ? `2H O/U ${line} Cards` : '2nd Half Cards';
+   194→  }
+   195→  if (/^asianTotalGoals_/.test(k)) {
+   196→    const line = formatLineFromKey(k);
+   197→    return line ? `Asian O/U ${line} Goals` : 'Asian Total Goals';
+   198→  }
+   199→  if (/^firstHalfAsianTotalGoals_/.test(k)) {
+   200→    const line = formatLineFromKey(k);
+   201→    return line ? `1H Asian O/U ${line} Goals` : '1st Half Asian Total Goals';
+   202→  }
+   203→  if (/^secondHalfAsianTotalGoals_/.test(k)) {
+   204→    const line = formatLineFromKey(k);
+   205→    return line ? `2H Asian O/U ${line} Goals` : '2nd Half Asian Total Goals';
+   206→  }
+   207→  if (/^asianTotalCorners_/.test(k)) {
+   208→    const line = formatLineFromKey(k);
+   209→    return line ? `Asian O/U ${line} Corners` : 'Asian Total Corners';
+   210→  }
+   211→  if (/^firstHalfAsianTotalCorners_/.test(k)) {
+   212→    const line = formatLineFromKey(k);
+   213→    return line ? `1H Asian O/U ${line} Corners` : '1st Half Asian Total Corners';
+   214→  }
+   215→  if (/^secondHalfAsianTotalCorners_/.test(k)) {
+   216→    const line = formatLineFromKey(k);
+   217→    return line ? `2H Asian O/U ${line} Corners` : '2nd Half Asian Total Corners';
+   218→  }
+   219→  if (/^asianTotalCards_/.test(k)) {
+   220→    const line = formatLineFromKey(k);
+   221→    return line ? `Asian O/U ${line} Cards` : 'Asian Total Cards';
+   222→  }
+   223→  if (/^firstHalfAsianTotalCards_/.test(k)) {
+   224→    const line = formatLineFromKey(k);
+   225→    return line ? `1H Asian O/U ${line} Cards` : '1st Half Asian Total Cards';
+   226→  }
+   227→  if (/^secondHalfAsianTotalCards_/.test(k)) {
+   228→    const line = formatLineFromKey(k);
+   229→    return line ? `2H Asian O/U ${line} Cards` : '2nd Half Asian Total Cards';
+   230→  }
+   231→  if (/^total_goluri_home/.test(k)) return 'Home Team Total Goals';
+   232→  if (/^total_goluri_away/.test(k)) return 'Away Team Total Goals';
+   233→  if (/market_marcheaza_home/.test(k)) return 'Home to Score';
+   234→  if (/market_marcheaza_away/.test(k)) return 'Away to Score';
+   235→  if (/market_clean_sheet_home/.test(k)) return 'Home Clean Sheet';
+   236→  if (/market_clean_sheet_away/.test(k)) return 'Away Clean Sheet';
+   237→  if (/total_goluri_impar_par/.test(k)) return 'Total Goals Odd/Even';
+   238→  if (/castiga_oricare_repriza_home/.test(k)) return 'Home to Win a Half';
+   239→  if (/castiga_oricare_repriza_away/.test(k)) return 'Away to Win a Half';
+   240→
+   241→  return k
+   242→    .replace(/([A-Z])/g, ' $1')
+   243→    .replace(/^./, (c) => c.toUpperCase())
+   244→    .replace(/_/g, ' ');
+   245→}
+   246→
+   247→function describeMarket(key) {
+   248→  if (MARKET_DESCRIPTIONS[key]) return MARKET_DESCRIPTIONS[key];
+   249→  const k = String(key);
+   250→  if (/^asianHandicap/.test(k)) {
+   251→    const line = formatHandicapLine(k);
+   252→    return `Asian handicap ${line} — split stake on two adjacent lines`;
+   253→  }
+   254→  if (/^handicap_/.test(k)) {
+   255→    const line = formatHandicapLine(k);
+   256→    return `European handicap ${line} — full stake on one line`;
+   257→  }
+   258→  if (/^totalGoals_/.test(k)) return 'Over/Under total match goals';
+   259→  if (/^firstHalfTotalGoals_/.test(k)) return 'Over/Under goals in first half';
+   260→  if (/^secondHalfTotalGoals_/.test(k)) return 'Over/Under goals in second half';
+   261→  if (/^totalCorners_/.test(k)) return 'Over/Under total match corners';
+   262→  if (/^firstHalfTotalCorners_/.test(k)) return 'Over/Under corners in first half';
+   263→  if (/^secondHalfTotalCorners_/.test(k)) return 'Over/Under corners in second half';
+   264→  if (/^totalCards_/.test(k)) return 'Over/Under total match cards';
+   265→  if (/^firstHalfTotalCards_/.test(k)) return 'Over/Under cards in first half';
+   266→  if (/^secondHalfTotalCards_/.test(k)) return 'Over/Under cards in second half';
+   267→  if (/^asianTotal/.test(k) || /^firstHalfAsianTotal/.test(k) || /^secondHalfAsianTotal/.test(k)) {
+   268→    return getLineMarketFamilyDescription(k);
+   269→  }
+   270→  if (/market_marcheaza_home/.test(k)) return 'Will the home team score at least one goal?';
+   271→  if (/market_marcheaza_away/.test(k)) return 'Will the away team score at least one goal?';
+   272→  if (/market_clean_sheet_home/.test(k)) return 'Will the home team concede zero goals?';
+   273→  if (/market_clean_sheet_away/.test(k)) return 'Will the away team concede zero goals?';
+   274→  return null;
+   275→}
+   276→
+   277→function getOutcomeLabel(key) {
+   278→  return OUTCOME_LABELS[key] || key;
+   279→}
+   280→
+   281→function isResultLikeMarketKey(marketKey) {
+   282→  const key = String(marketKey || '').toLowerCase();
+   283→  return RESULT_MARKET_KEY_RE.test(key) && !NON_THREE_WAY_RESULT_KEY_RE.test(key);
+   284→}
+   285→
+   286→function normalizeResultOutcomeKey(outcomeKey) {
+   287→  const key = String(outcomeKey || '').toLowerCase();
+   288→  if (key === 'home' || /(?:^|_)(?:1|home)(?:_|$)/.test(key)) return 'home';
+   289→  if (key === 'draw' || /(?:^|_)(?:x|draw|egal)(?:_|$)/.test(key)) return 'draw';
+   290→  if (key === 'away' || /(?:^|_)(?:2|away)(?:_|$)/.test(key)) return 'away';
+   291→  return null;
+   292→}
+   293→
+   294→function expectedOutcomesForMarket(marketKey, outcomeKeys, sportKey) {
+   295→  const key = String(marketKey);
+   296→  const expected = MARKET_OUTCOMES[key];
+   297→  if (expected) return expected;
+   298→
+   299→  // Sport-aware override: e.g. basketball h2h has no draw
+   300→  if (sportKey) {
+   301→    const sportOutcomes = sportMarketOutcomes(sportKey, key);
+   302→    if (sportOutcomes) return sportOutcomes;
+   303→  }
+   304→
+   305→  if (isResultLikeMarketKey(key)) {
+   306→    return ['home', 'draw', 'away'];
+   307→  }
+   308→
+   309→  if (key.startsWith('handicap3Way_')) {
+   310→    return ['home', 'draw', 'away'];
+   311→  }
+   312→
+   313→  if (key.startsWith('handicap_') && outcomeKeys.includes('draw')) {
+   314→    return ['home', 'draw', 'away'];
+   315→  }
+   316→
+   317→  return null;
+   318→}
+   319→
+   320→function isBucketLikeOutcomeKey(outcomeKey) {
+   321→  const key = String(outcomeKey || '').toLowerCase();
+   322→  return BUCKET_OUTCOME_KEY_RE.test(key)
+   323→    || /^\d+$/.test(key)
+   324→    || /^\d+_?\d*$/.test(key)
+   325→    || /^\d+(?:plus|minus)\d+$/.test(key);
+   326→}
+   327→
+   328→function hasCompleteBucketCoverage(marketKey, outcomeKeys) {
+   329→  const key = String(marketKey || '').toLowerCase();
+   330→  if (!key.startsWith('market_')) return true;
+   331→  const bucketKeys = outcomeKeys.filter(isBucketLikeOutcomeKey);
+   332→  if (bucketKeys.length === 0) return true;
+   333→  return bucketKeys.length >= 3;
+   334→}
+   335→
+   336→function hasExpectedOutcomes(best, expected) {
+   337→  if (!expected) return true;
+   338→  return expected.every((outcomeKey) => {
+   339→    if (best[outcomeKey]) return true;
+   340→    return Object.keys(best).some((key) => normalizeResultOutcomeKey(key) === outcomeKey);
+   341→  });
+   342→}
+   343→
+   344→function impliedProb(price) {
+   345→  return 1 / price;
+   346→}
+   347→
+   348→function calculateNoVigMarket(pricesByOutcome) {
+   349→  const entries = Object.entries(pricesByOutcome || {})
+   350→    .filter(([, price]) => typeof price === 'number' && Number.isFinite(price) && price > 1);
+   351→  if (entries.length < 2) return null;
+   352→
+   353→  const outcomes = entries.map(([outcome, price]) => ({
+   354→    outcome,
+   355→    price,
+   356→    impliedProb: impliedProb(price),
+   357→  }));
+   358→  const overround = outcomes.reduce((sum, outcome) => sum + outcome.impliedProb, 0);
+   359→  if (!(overround > 0)) return null;
+   360→
+   361→  return {
+   362→    overround,
+   363→    hold: overround - 1,
+   364→    outcomes: outcomes.map((outcome) => {
+   365→      const fairProb = outcome.impliedProb / overround;
+   366→      return {
+   367→        ...outcome,
+   368→        fairProb,
+   369→        fairOdds: fairProb > 0 ? 1 / fairProb : outcome.price,
+   370→      };
+   371→    }),
+   372→  };
+   373→}
+   374→
+   375→/** Collect all unique market keys across all bookmakers for an event */
+   376→function getEventMarkets(event) {
+   377→  const marketKeys = new Set();
+   378→  for (const bm of event.bookmakers || []) {
+   379→    if (bm.markets && typeof bm.markets === 'object') {
+   380→      for (const key of Object.keys(bm.markets)) {
+   381→        marketKeys.add(key);
+   382→      }
+   383→    }
+   384→  }
+   385→  return [...marketKeys];
+   386→}
+   387→
+   388→/** For a given event + market key, find the best price for each outcome across all bookmakers */
+   389→function findBestPrices(event, marketKey) {
+   390→  const outcomes = {};
+   391→  for (const bm of event.bookmakers || []) {
+   392→    if (!bm.markets || !bm.markets[marketKey]) continue;
+   393→    const marketData = bm.markets[marketKey];
+   394→    for (const [outcomeKey, price] of Object.entries(marketData)) {
+   395→      if (typeof price !== 'number' || price <= 1) continue;
+   396→      if (!outcomes[outcomeKey] || price > outcomes[outcomeKey].price) {
+   397→        outcomes[outcomeKey] = {
+   398→          price,
+   399→          bookmaker: bm.name,
+   400→          url: bm.eventUrl || bm.bookmakerUrl || '',
+   401→          label: getOutcomeLabel(outcomeKey),
+   402→        };
+   403→      }
+   404→    }
+   405→  }
+   406→  return outcomes;
+   407→}
+   408→
+   409→/** Collect all prices per outcome across bookmakers for a market */
+   410→function collectAllPrices(event, marketKey) {
+   411→  const all = {};
+   412→  for (const bm of event.bookmakers || []) {
+   413→    if (!bm.markets || !bm.markets[marketKey]) continue;
+   414→    const md = bm.markets[marketKey];
+   415→    for (const [ok, price] of Object.entries(md)) {
+   416→      if (typeof price !== 'number' || price <= 1) continue;
+   417→      if (!all[ok]) all[ok] = [];
+   418→      all[ok].push({ price, bookmaker: bm.name, url: bm.eventUrl || bm.bookmakerUrl || '' });
+   419→    }
+   420→  }
+   421→  return all;
+   422→}
+   423→
+   424→/* ===== Formula 1: Classic cross-book arbitrage ===== */
+   425→function detectArbitrage(event, marketKey, sportKey) {
+   426→  const best = findBestPrices(event, marketKey);
+   427→  const outcomeKeys = Object.keys(best);
+   428→  if (outcomeKeys.length < 2) return null;
+   429→
+   430→  // Reject known markets with incomplete outcomes — e.g. a 1X2 market
+   431→  // where only Home and Away prices were parsed (missing Draw makes
+   432→  // the implied-probability sum artificially low, producing fake edges).
+   433→  const expected = expectedOutcomesForMarket(marketKey, outcomeKeys, sportKey || event.sport);
+   434→  if (!hasExpectedOutcomes(best, expected)) return null;
+   435→  if (!hasCompleteBucketCoverage(marketKey, outcomeKeys)) return null;
+   436→
+   437→  let totalProb = 0;
+   438→  const legs = [];
+   439→  for (const key of outcomeKeys) {
+   440→    const p = best[key];
+   441→    totalProb += impliedProb(p.price);
+   442→    legs.push({
+   443→      outcome: key,
+   444→      label: p.label,
+   445→      bookmaker: p.bookmaker,
+   446→      price: p.price,
+   447→      url: p.url || '',
+   448→    });
+   449→  }
+   450→
+   451→  const edge = 1 - totalProb;
+   452→  if (edge <= 0) return null;
+   453→
+   454→  // Sanity cap: real arbitrage edges are typically 0.5–5%. Anything
+   455→  // above 25% is virtually always a data-quality issue (missing outcome,
+   456→  // misparsed exotic market, stale price, different settlement rules).
+   457→  if (edge > MAX_ARB_EDGE) return null;
+   458→
+   459→  const stake = 100;
+   460→  for (const leg of legs) {
+   461→    leg.stake = (stake * impliedProb(leg.price)) / totalProb;
+   462→  }
+   463→  const returnAmount = stake / totalProb;
+   464→  const profit = returnAmount - stake;
+   465→
+   466→  return {
+   467→    marketKey,
+   468→    marketLabel: getMarketLabel(marketKey),
+   469→    legs,
+   470→    edge,
+   471→    profit,
+   472→    returnAmount,
+   473→    totalProb,
+   474→    stake,
+   475→    type: 'classic',
+   476→    confidence: classifyConfidence(edge, outcomeKeys.length, legs.length),
+   477→  };
+   478→}
+   479→
+   480→/* ===== Formula 2: Cross-market arbitrage (h2h vs doubleChance) ===== */
+   481→function detectCrossMarketArbitrage(event) {
+   482→  const results = [];
+   483→  const h2hBest = findBestPrices(event, 'h2h');
+   484→  const dcBest = findBestPrices(event, 'doubleChance');
+   485→
+   486→  if (!h2hBest.away || !h2hBest.home) return results;
+   487→
+   488→  // DC 1X + h2h 2
+   489→  if (dcBest.homeDraw) {
+   490→    const prob1X = impliedProb(dcBest.homeDraw.price);
+   491→    const prob2 = impliedProb(h2hBest.away.price);
+   492→    const total = prob1X + prob2;
+   493→    if (total < 1) {
+   494→      const edge = 1 - total;
+   495→      const stake = 100;
+   496→      const s1 = (stake * prob1X) / total;
+   497→      const s2 = (stake * prob2) / total;
+   498→      results.push({
+   499→        marketKey: 'cross_1X_2',
+   500→        marketLabel: '1X (DC) + 2 (1X2)',
+   501→        type: 'cross-market',
+   502→        legs: [
+   503→          { outcome: '1X', label: '1X', bookmaker: dcBest.homeDraw.bookmaker, price: dcBest.homeDraw.price, stake: s1, url: dcBest.homeDraw.url || '' },
+   504→          { outcome: 'away', label: '2', bookmaker: h2hBest.away.bookmaker, price: h2hBest.away.price, stake: s2, url: h2hBest.away.url || '' },
+   505→        ],
+   506→        edge,
+   507→        profit: stake / total - stake,
+   508→        totalProb: total,
+   509→        stake,
+   510→        confidence: classifyConfidence(edge, 2, 2),
+   511→      });
+   512→    }
+   513→  }
+   514→
+   515→  // DC X2 + h2h 1
+   516→  if (dcBest.drawAway) {
+   517→    const probX2 = impliedProb(dcBest.drawAway.price);
+   518→    const prob1 = impliedProb(h2hBest.home.price);
+   519→    const total = probX2 + prob1;
+   520→    if (total < 1) {
+   521→      const edge = 1 - total;
+   522→      const stake = 100;
+   523→      const s1 = (stake * prob1) / total;
+   524→      const s2 = (stake * probX2) / total;
+   525→      results.push({
+   526→        marketKey: 'cross_1_X2',
+   527→        marketLabel: '1 (1X2) + X2 (DC)',
+   528→        type: 'cross-market',
+   529→        legs: [
+   530→          { outcome: 'home', label: '1', bookmaker: h2hBest.home.bookmaker, price: h2hBest.home.price, stake: s1, url: h2hBest.home.url || '' },
+   531→          { outcome: 'X2', label: 'X2', bookmaker: dcBest.drawAway.bookmaker, price: dcBest.drawAway.price, stake: s2, url: dcBest.drawAway.url || '' },
+   532→        ],
+   533→        edge,
+   534→        profit: stake / total - stake,
+   535→        totalProb: total,
+   536→        stake,
+   537→        confidence: classifyConfidence(edge, 2, 2),
+   538→      });
+   539→    }
+   540→  }
+   541→
+   542→  // DC 12 + h2h X
+   543→  if (dcBest.homeAway && h2hBest.draw) {
+   544→    const prob12 = impliedProb(dcBest.homeAway.price);
+   545→    const probX = impliedProb(h2hBest.draw.price);
+   546→    const total = prob12 + probX;
+   547→    if (total < 1) {
+   548→      const edge = 1 - total;
+   549→      const stake = 100;
+   550→      const s1 = (stake * prob12) / total;
+   551→      const s2 = (stake * probX) / total;
+   552→      results.push({
+   553→        marketKey: 'cross_12_X',
+   554→        marketLabel: '12 (DC) + X (1X2)',
+   555→        type: 'cross-market',
+   556→        legs: [
+   557→          { outcome: '12', label: '12', bookmaker: dcBest.homeAway.bookmaker, price: dcBest.homeAway.price, stake: s1, url: dcBest.homeAway.url || '' },
+   558→          { outcome: 'draw', label: 'X', bookmaker: h2hBest.draw.bookmaker, price: h2hBest.draw.price, stake: s2, url: h2hBest.draw.url || '' },
+   559→        ],
+   560→        edge,
+   561→        profit: stake / total - stake,
+   562→        totalProb: total,
+   563→        stake,
+   564→        confidence: classifyConfidence(edge, 2, 2),
+   565→      });
+   566→    }
+   567→  }
+   568→
+   569→  return results;
+   570→}
+   571→
+   572→/* ===== Formula 3: Middle bets (over/under line gap) ===== */
+   573→function detectMiddleBets(event) {
+   574→  const results = [];
+   575→  const marketKeys = getEventMarkets(event);
+   576→
+   577→  const lineMarkets = [];
+   578→  for (const mk of marketKeys) {
+   579→    if (/^(?:total|asianTotal)(Goals|Corners|Cards)_/.test(mk)
+   580→      || /^firstHalf(?:Asian)?Total/.test(mk)
+   581→      || /^secondHalf(?:Asian)?Total/.test(mk)) {
+   582→      const best = findBestPrices(event, mk);
+   583→      if (best.over && best.under) {
+   584→        const line = parseLineNumberFromKey(mk);
+   585→        if (line !== null) {
+   586→          const familyLabel = getLineMarketFamilyLabel(mk);
+   587→          lineMarkets.push({
+   588→            marketKey: mk,
+   589→            groupKey: String(mk).replace(/_\d+(?:_\d+)?$/, ''),
+   590→            line,
+   591→            over: best.over,
+   592→            under: best.under,
+   593→            marketLabel: getMarketLabel(mk),
+   594→            marketFamilyLabel: familyLabel,
+   595→            marketDescription: describeMarket(mk),
+   596→          });
+   597→        }
+   598→      }
+   599→    }
+   600→  }
+   601→
+   602→  lineMarkets.sort((a, b) => a.groupKey.localeCompare(b.groupKey) || a.line - b.line);
+   603→
+   604→  for (let i = 0; i < lineMarkets.length - 1; i++) {
+   605→    const lower = lineMarkets[i];
+   606→    const higher = lineMarkets[i + 1];
+   607→
+   608→    if (lower.groupKey !== higher.groupKey || higher.line <= lower.line) continue;
+   609→
+   610→    const probOver = impliedProb(lower.over.price);
+   611→    const probUnder = impliedProb(higher.under.price);
+   612→    const total = probOver + probUnder;
+   613→
+   614→    const hasMiddle = higher.line - lower.line >= 0.5;
+   615→    const edge = 1 - total;
+   616→
+   617→    if (edge > -0.05 || (hasMiddle && edge > -0.1)) {
+   618→      const stake = 100;
+   619→      const s1 = (stake * probOver) / total;
+   620→      const s2 = (stake * probUnder) / total;
+   621→      const profit = stake / total - stake;
+   622→
+   623→      results.push({
+   624→        marketKey: `middle_${lower.marketKey}_${higher.marketKey}`,
+   625→        marketLabel: `${lower.marketFamilyLabel || 'Line'} Middle: Over ${lower.line} / Under ${higher.line}`,
+   626→        marketFamilyLabel: lower.marketFamilyLabel || null,
+   627→        marketDescription: lower.marketDescription || higher.marketDescription || null,
+   628→        type: 'middle',
+   629→        legs: [
+   630→          { outcome: 'over', label: formatMiddleLegLabel('over', lower.line, lower.marketFamilyLabel), bookmaker: lower.over.bookmaker, price: lower.over.price, stake: s1, url: lower.over.url || '' },
+   631→          { outcome: 'under', label: formatMiddleLegLabel('under', higher.line, higher.marketFamilyLabel), bookmaker: higher.under.bookmaker, price: higher.under.price, stake: s2, url: higher.under.url || '' },
+   632→        ],
+   633→        edge,
+   634→        profit,
+   635→        totalProb: total,
+   636→        stake,
+   637→        hasMiddle,
+   638→        middleWindow: `${lower.line} - ${higher.line}`,
+   639→        confidence: hasMiddle && edge > 0 ? 'high' : edge > 0 ? 'trusted' : 'review',
+   640→      });
+   641→    }
+   642→  }
+   643→
+   644→  return results;
+   645→}
+   646→
+   647→/* ===== Formula 4: Asian handicap arbitrage ===== */
+   648→function detectHandicapArbitrage(event) {
+   649→  const results = [];
+   650→  const marketKeys = getEventMarkets(event);
+   651→
+   652→  for (const mk of marketKeys) {
+   653→    if (!/^handicap_|^asianHandicap_/.test(mk)) continue;
+   654→
+   655→    const allPrices = collectAllPrices(event, mk);
+   656→    const outcomes = Object.keys(allPrices);
+   657→    if (outcomes.length < 2) continue;
+   658→
+   659→    // Skip 3-way European Handicap markets
+   660→    if (allPrices.draw && allPrices.draw.length > 0) {
+   661→      continue;
+   662→    }
+   663→
+   664→    const bestHome = allPrices.home?.sort((a, b) => b.price - a.price)[0];
+   665→    const bestAway = allPrices.away?.sort((a, b) => b.price - a.price)[0];
+   666→
+   667→    if (!bestHome || !bestAway) continue;
+   668→
+   669→    const total = impliedProb(bestHome.price) + impliedProb(bestAway.price);
+   670→    if (total < 1) {
+   671→      const edge = 1 - total;
+   672→      const stake = 100;
+   673→      const s1 = (stake * impliedProb(bestHome.price)) / total;
+   674→      const s2 = (stake * impliedProb(bestAway.price)) / total;
+   675→
+   676→      results.push({
+   677→        marketKey: mk,
+   678→        marketLabel: getMarketLabel(mk),
+   679→        type: 'handicap',
+   680→        legs: [
+   681→          { outcome: 'home', label: 'Home', bookmaker: bestHome.bookmaker, price: bestHome.price, stake: s1, url: bestHome.url || '' },
+   682→          { outcome: 'away', label: 'Away', bookmaker: bestAway.bookmaker, price: bestAway.price, stake: s2, url: bestAway.url || '' },
+   683→        ],
+   684→        edge,
+   685→        profit: stake / total - stake,
+   686→        totalProb: total,
+   687→        stake,
+   688→        confidence: classifyConfidence(edge, 2, 2),
+   689→      });
+   690→    }
+   691→  }
+   692→
+   693→  return results;
+   694→}
+   695→
+   696→/* ===== Confidence classifier ===== */
+   697→function classifyConfidence(edge, outcomeCount, legCount) {
+   698→  if (edge >= 0.05 && outcomeCount >= 3) return 'high';
+   699→  if (edge >= 0.02) return 'trusted';
+   700→  if (edge >= 0.005) return 'review';
+   701→  return 'risky';
+   702→}
+   703→
+   704→/* ===== Value Bet Detection with Z-score and Kelly ===== */
+   705→function detectValueBet(event, marketKey, sportKey) {
+   706→  const best = findBestPrices(event, marketKey);
+   707→  const outcomeKeys = Object.keys(best);
+   708→  if (outcomeKeys.length < 2) return null;
+   709→
+   710→  const expected = expectedOutcomesForMarket(marketKey, outcomeKeys, sportKey || event.sport);
+   711→  if (!hasExpectedOutcomes(best, expected)) return null;
+   712→  if (!hasCompleteBucketCoverage(marketKey, outcomeKeys)) return null;
+   713→
+   714→  const allPrices = collectAllPrices(event, marketKey);
+   715→
+   716→  // 1a. Look for a sharp bookmaker reference line (Pinnacle, Betfair)
+   717→  const sharpPrice = findSharpPrice(allPrices);
+   718→
+   719→  // 1. Calculate consensus price for all outcomes first to compute total market overround
+   720→  const consensusPrices = {};
+   721→  const bookCounts = {};
+   722→  const zScores = {};
+   723→
+   724→  for (const key of outcomeKeys) {
+   725→    const entries = allPrices[key] || [];
+   726→    const prices = entries.map((e) => e.price).filter((p) => p > 1);
+   727→    if (prices.length < 2) continue;
+   728→
+   729→    prices.sort((a, b) => a - b);
+   730→    const trimmed = prices.length > 2 ? prices.slice(1, -1) : prices;
+   731→    const consensus = trimmed.reduce((s, p) => s + p, 0) / trimmed.length;
+   732→    consensusPrices[key] = consensus;
+   733→    bookCounts[key] = prices.length;
+   734→
+   735→    // Calculate z-score
+   736→    const mean = consensus;
+   737→    const variance = trimmed.reduce((s, p) => s + (p - mean) ** 2, 0) / trimmed.length;
+   738→    const stdDev = Math.sqrt(variance);
+   739→    zScores[key] = stdDev > 0 ? (best[key].price - mean) / stdDev : 0;
+   740→  }
+   741→
+   742→  let consensusOverround = 0;
+   743→  let hasAllConsensus = true;
+   744→  for (const key of outcomeKeys) {
+   745→    if (consensusPrices[key]) {
+   746→      consensusOverround += impliedProb(consensusPrices[key]);
+   747→    } else {
+   748→      hasAllConsensus = false;
+   749→    }
+   750→  }
+   751→
+   752→  const valueCandidates = [];
+   753→  for (const key of outcomeKeys) {
+   754→    if (!consensusPrices[key]) continue;
+   755→
+   756→    const consensus = consensusPrices[key];
+   757→    const zScore = zScores[key];
+   758→
+   759→    // Remove margin using proportional consensus overround
+   760→    let fairProb;
+   761→    if (sharpPrice && sharpPrice.price && hasAllConsensus && consensusOverround > 0) {
+   762→      // Build a synthetic market using the sharp book's price for the current outcome
+   763→      const sharpPricesMap = {};
+   764→      for (const ok of outcomeKeys) {
+   765→        sharpPricesMap[ok] = (ok === key) ? sharpPrice.price : (consensusPrices[ok] || best[ok]?.price);
+   766→      }
+   767→      const sharpFairMarket = calculateNoVigMarket(sharpPricesMap);
+   768→      const sharpOutcome = sharpFairMarket?.outcomes?.find(o => o.outcome === key);
+   769→      if (sharpOutcome) {
+   770→        fairProb = sharpOutcome.fairProb;
+   771→      } else {
+   772→        fairProb = impliedProb(consensus) / consensusOverround;
+   773→      }
+   774→    } else if (hasAllConsensus && consensusOverround > 0) {
+   775→      fairProb = impliedProb(consensus) / consensusOverround;
+   776→    } else {
+   777→      // Fallback to 5% vig if we don't have consensus for all legs
+   778→      fairProb = impliedProb(consensus) / 1.05;
+   779→    }
+   780→
+   781→    const fairOdds = fairProb > 0 ? 1 / fairProb : consensus;
+   782→    const gap = (best[key].price - consensus) / consensus;
+   783→    const fairGap = (best[key].price - fairOdds) / fairOdds;
+   784→
+   785→    const b = best[key].price - 1;
+   786→    const p = fairProb > 0 && fairProb < 1 ? fairProb : impliedProb(consensus);
+   787→    const q = 1 - p;
+   788→    const kelly = b > 0 ? (b * p - q) / b : 0;
+   789→    const kellyFraction = Math.max(0, Math.min(0.25, kelly));
+   790→
+   791→    const isValue = gap >= MIN_VALUE_EDGE || zScore > 2 || (kelly > 0 && fairGap > 0.01);
+   792→
+   793→    if (isValue) {
+   794→      valueCandidates.push({
+   795→        outcome: key,
+   796→        label: best[key].label,
+   797→        bookmaker: best[key].bookmaker,
+   798→        price: best[key].price,
+   799→        consensus,
+   800→        fairOdds,
+   801→        gap,
+   802→        fairGap,
+   803→        zScore,
+   804→        kelly: kellyFraction,
+   805→        url: best[key].url || '',
+   806→        bookCount: bookCounts[key],
+   807→      });
+   808→    }
+   809→  }
+   810→
+   811→  if (valueCandidates.length === 0) return null;
+   812→  const top = valueCandidates.sort((a, b) => b.kelly - a.kelly || b.gap - a.gap)[0];
+   813→  return {
+   814→    marketKey,
+   815→    marketLabel: getMarketLabel(marketKey),
+   816→    ...top,
+   817→  };
+   818→}
+   819→
+   820→/* ===== Formula 5: BTTS + Team-to-Score arbitrage ===== */
+   821→function detectBttsTeamScoreArbitrage(event) {
+   822→  const results = [];
+   823→
+   824→  const bttsBest = findBestPrices(event, 'bothTeamsToScore');
+   825→  if (!bttsBest.yes) return results;
+   826→
+   827→  const homeScoreBest = findBestPrices(event, 'market_marcheaza_home');
+   828→  const homeTotal05Best = findBestPrices(event, 'market_total_goluri_home_0_5');
+   829→
+   830→  let bestHomeNo = null;
+   831→  if (homeScoreBest.no && homeTotal05Best.under) {
+   832→    bestHomeNo = homeScoreBest.no.price > homeTotal05Best.under.price ? homeScoreBest.no : homeTotal05Best.under;
+   833→  } else {
+   834→    bestHomeNo = homeScoreBest.no || homeTotal05Best.under || null;
+   835→  }
+   836→
+   837→  const awayScoreBest = findBestPrices(event, 'market_marcheaza_away');
+   838→  const awayTotal05Best = findBestPrices(event, 'market_total_goluri_away_0_5');
+   839→
+   840→  let bestAwayNo = null;
+   841→  if (awayScoreBest.no && awayTotal05Best.under) {
+   842→    bestAwayNo = awayScoreBest.no.price > awayTotal05Best.under.price ? awayScoreBest.no : awayTotal05Best.under;
+   843→  } else {
+   844→    bestAwayNo = awayScoreBest.no || awayTotal05Best.under || null;
+   845→  }
+   846→
+   847→  if (!bestHomeNo || !bestAwayNo) return results;
+   848→
+   849→  const total = impliedProb(bttsBest.yes.price) + impliedProb(bestHomeNo.price) + impliedProb(bestAwayNo.price);
+   850→  if (total < 1) {
+   851→    const edge = 1 - total;
+   852→    const stake = 100;
+   853→    const s1 = (stake * impliedProb(bttsBest.yes.price)) / total;
+   854→    const s2 = (stake * impliedProb(bestHomeNo.price)) / total;
+   855→    const s3 = (stake * impliedProb(bestAwayNo.price)) / total;
+   856→
+   857→    results.push({
+   858→      marketKey: 'cross_btts_team_score',
+   859→      marketLabel: 'BTTS Yes + Team Clean Sheets',
+   860→      type: 'cross-market',
+   861→      legs: [
+   862→        { outcome: 'yes', label: 'BTTS Yes', bookmaker: bttsBest.yes.bookmaker, price: bttsBest.yes.price, stake: s1, url: bttsBest.yes.url || '' },
+   863→        { outcome: 'homeNo', label: 'Home to Score: No', bookmaker: bestHomeNo.bookmaker, price: bestHomeNo.price, stake: s2, url: bestHomeNo.url || '' },
+   864→        { outcome: 'awayNo', label: 'Away to Score: No', bookmaker: bestAwayNo.bookmaker, price: bestAwayNo.price, stake: s3, url: bestAwayNo.url || '' },
+   865→      ],
+   866→      edge,
+   867→      profit: stake / total - stake,
+   868→      totalProb: total,
+   869→      stake,
+   870→      confidence: classifyConfidence(edge, 3, 3),
+   871→    });
+   872→  }
+   873→
+   874→  return results;
+   875→}
+   876→
+   877→/* ===== Formula 6: Team Totals vs Match Totals arbitrage ===== */
+   878→function detectTeamMatchTotalArbitrage(event) {
+   879→  const results = [];
+   880→  const marketKeys = getEventMarkets(event);
+   881→
+   882→  const matchLines = [];
+   883→  const homeLines = [];
+   884→  const awayLines = [];
+   885→
+   886→  for (const mk of marketKeys) {
+   887→    const line = parseLineNumberFromKey(mk);
+   888→    if (line === null) continue;
+   889→
+   890→    if (mk.startsWith('totalGoals_')) {
+   891→      matchLines.push({ key: mk, line });
+   892→    } else if (mk.startsWith('market_total_goluri_home_')) {
+   893→      homeLines.push({ key: mk, line });
+   894→    } else if (mk.startsWith('market_total_goluri_away_')) {
+   895→      awayLines.push({ key: mk, line });
+   896→    }
+   897→  }
+   898→
+   899→  if (matchLines.length === 0 || homeLines.length === 0 || awayLines.length === 0) {
+   900→    return results;
+   901→  }
+   902→
+   903→  for (const m of matchLines) {
+   904→    for (const h of homeLines) {
+   905→      const neededA = m.line + 0.5 - h.line;
+   906→      if (neededA <= 0) continue;
+   907→
+   908→      const a = awayLines.find((item) => Math.abs(item.line - neededA) < 0.01);
+   909→      if (!a) continue;
+   910→
+   911→      const matchBest = findBestPrices(event, m.key);
+   912→      const homeBest = findBestPrices(event, h.key);
+   913→      const awayBest = findBestPrices(event, a.key);
+   914→
+   915→      if (!matchBest.over || !homeBest.under || !awayBest.under) continue;
+   916→
+   917→      const priceOver = matchBest.over.price;
+   918→      const priceHomeUnder = homeBest.under.price;
+   919→      const priceAwayUnder = awayBest.under.price;
+   920→
+   921→      const total = impliedProb(priceOver) + impliedProb(priceHomeUnder) + impliedProb(priceAwayUnder);
+   922→      if (total < 1) {
+   923→        const edge = 1 - total;
+   924→        const stake = 100;
+   925→        const s1 = (stake * impliedProb(priceOver)) / total;
+   926→        const s2 = (stake * impliedProb(priceHomeUnder)) / total;
+   927→        const s3 = (stake * impliedProb(priceAwayUnder)) / total;
+   928→
+   929→        results.push({
+   930→          marketKey: `cross_totals_${m.key}_${h.key}_${a.key}`,
+   931→          marketLabel: `Totals: Over ${m.line} (Match) + Under ${h.line} (Home) + Under ${a.line} (Away)`,
+   932→          type: 'cross-market',
+   933→          legs: [
+   934→            { outcome: 'over', label: `Over ${m.line} Goals`, bookmaker: matchBest.over.bookmaker, price: priceOver, stake: s1, url: matchBest.over.url || '' },
+   935→            { outcome: 'under', label: `Home Under ${h.line}`, bookmaker: homeBest.under.bookmaker, price: priceHomeUnder, stake: s2, url: homeBest.under.url || '' },
+   936→            { outcome: 'under', label: `Away Under ${a.line}`, bookmaker: awayBest.under.bookmaker, price: priceAwayUnder, stake: s3, url: awayBest.under.url || '' },
+   937→          ],
+   938→          edge,
+   939→          profit: stake / total - stake,
+   940→          totalProb: total,
+   941→          stake,
+   942→          confidence: classifyConfidence(edge, 3, 3),
+   943→        });
+   944→      }
+   945→    }
+   946→  }
+   947→
+   948→  return results;
+   949→}
+   950→
+   951→
+   952→
+   953→/** Categorize a market key into its settlement time scope. */
+   954→const SETTLEMENT_SCOPES = {
+   955→  // Full-time 90 min
+   956→  h2h: 'fulltime',
+   957→  doubleChance: 'fulltime',
+   958→  drawNoBet: 'fulltime',
+   959→  bothTeamsToScore: 'fulltime',
+   960→  toQualify: 'overtime',
+   961→  halfTimeOrFullTime: 'htft',
+   962→  // First half
+   963→  firstHalfH2h: 'firstHalf',
+   964→  firstHalfDrawNoBet: 'firstHalf',
+   965→  // Second half
+   966→  secondHalfH2h: 'secondHalf',
+   967→  secondHalfDrawNoBet: 'secondHalf',
+   968→};
+   969→
+   970→/** Prefix-based scope detection. totalGoals_, totalCorners_, totalCards_ → fulltime,
+   971→ *  firstHalfTotalGoals_ → firstHalf, etc. */
+   972→function getSettlementScope(marketKey) {
+   973→  const key = String(marketKey || '');
+   974→  // Direct match
+   975→  if (SETTLEMENT_SCOPES[key]) return SETTLEMENT_SCOPES[key];
+   976→  // Prefix match (longest first)
+   977→  for (const [prefix, scope] of Object.entries(SETTLEMENT_SCOPES).sort((a, b) => b[0].length - a[0].length)) {
+   978→    if (key.startsWith(prefix)) return scope;
+   979→  }
+   980→  // totalGoals_, totalCorners_, totalCards_ → fulltime
+   981→  if (/^total(Goals|Corners|Cards)_/.test(key)) return 'fulltime';
+   982→  if (/^firstHalfTotal/.test(key)) return 'firstHalf';
+   983→  if (/^secondHalfTotal/.test(key)) return 'secondHalf';
+   984→  // Market-specific: handicap defaults to fulltime
+   985→  if (/^(asian)?[Hh]andicap/.test(key)) return 'fulltime';
+   986→  return 'unknown';
+   987→}
+   988→
+   989→/** Downgrade confidence if legs span different settlement scopes. */
+   990→function applySettlementRisk(baseConfidence, marketKeys) {
+   991→  const scopes = marketKeys.map(mk => getSettlementScope(mk)).filter(s => s !== 'unknown');
+   992→  const unique = new Set(scopes);
+   993→  if (unique.size > 1) return 'risky';
+   994→  return baseConfidence;
+   995→}
+   996→
+   997→/** Build a lookup index for an event to avoid repeated iteration.
+   998→ * Returns { bookmakersByMarket: Map, allMarketKeys: string[] } */
+   999→function buildEventIndex(event) {
+  1000→  const bookmakersByMarket = new Map();
+  1001→  const allMarketKeys = new Set();
+  1002→  for (const bm of event.bookmakers || []) {
+  1003→    if (!bm.markets || typeof bm.markets !== 'object') continue;
+  1004→    for (const [marketKey, prices] of Object.entries(bm.markets)) {
+  1005→      allMarketKeys.add(marketKey);
+  1006→      if (!bookmakersByMarket.has(marketKey)) {
+  1007→        bookmakersByMarket.set(marketKey, []);
+  1008→      }
+  1009→      bookmakersByMarket.get(marketKey).push({ bookmaker: bm, prices });
+  1010→    }
+  1011→  }
+  1012→  return { bookmakersByMarket, allMarketKeys: [...allMarketKeys] };
+  1013→}
+  1014→
+  1015→/* ===== Aggregate all opportunities for an event ===== */
+  1016→function getAllOpportunities(events) {
+  1017→  const opps = [];
+  1018→  for (const event of events) {
+  1019→    const eventName = `${event.homeTeam} vs ${event.awayTeam}`;
+  1020→    const { allMarketKeys: marketKeys } = buildEventIndex(event);
+  1021→
+  1022→      for (const mk of marketKeys) {
+  1023→        const arb = detectArbitrage(event, mk, event.sport);
+  1024→      if (arb) {
+  1025→        arb.eventName = eventName;
+  1026→        arb.confidence = applySettlementRisk(arb.confidence, [mk]);
+  1027→        arb.settlementScope = getSettlementScope(mk);
+  1028→        arb.competition = event.competition;
+  1029→        arb.kickoff = event.startsAt;
+  1030→        opps.push(arb);
+  1031→      }
+  1032→    }
+  1033→
+  1034→    const crossMarket = detectCrossMarketArbitrage(event);
+  1035→    for (const cm of crossMarket) {
+  1036→      cm.eventName = eventName;
+  1037→      cm.confidence = applySettlementRisk(cm.confidence, [cm.marketKey]);
+  1038→      cm.competition = event.competition;
+  1039→      cm.kickoff = event.startsAt;
+  1040→      opps.push(cm);
+  1041→    }
+  1042→
+  1043→    const middles = detectMiddleBets(event);
+  1044→    for (const m of middles) {
+  1045→      m.eventName = eventName;
+  1046→      m.confidence = applySettlementRisk(m.confidence, [m.marketKey]);
+  1047→      m.competition = event.competition;
+  1048→      m.kickoff = event.startsAt;
+  1049→      opps.push(m);
+  1050→    }
+  1051→
+  1052→    const handicaps = detectHandicapArbitrage(event);
+  1053→    for (const h of handicaps) {
+  1054→      h.eventName = eventName;
+  1055→      h.confidence = applySettlementRisk(h.confidence, [h.marketKey]);
+  1056→      h.competition = event.competition;
+  1057→      h.kickoff = event.startsAt;
+  1058→      opps.push(h);
+  1059→    }
+  1060→
+  1061→    const bttsTeamScore = detectBttsTeamScoreArbitrage(event);
+  1062→    for (const bts of bttsTeamScore) {
+  1063→      bts.eventName = eventName;
+  1064→      bts.competition = event.competition;
+  1065→      bts.kickoff = event.startsAt;
+  1066→      opps.push(bts);
+  1067→    }
+  1068→
+  1069→    const teamMatchTotals = detectTeamMatchTotalArbitrage(event);
+  1070→    for (const tmt of teamMatchTotals) {
+  1071→      tmt.eventName = eventName;
+  1072→      tmt.competition = event.competition;
+  1073→      tmt.kickoff = event.startsAt;
+  1074→      opps.push(tmt);
+  1075→    }
+  1076→  }
+  1077→  return opps;
+  1078→}
+  1079→
+  1080→function getValueBets(events, maxBets = 30) {
+  1081→  const bets = [];
+  1082→  for (const event of events) {
+  1083→    const eventName = `${event.homeTeam} vs ${event.awayTeam}`;
+  1084→    const { allMarketKeys: marketKeys } = buildEventIndex(event);
+  1085→      for (const mk of marketKeys) {
+  1086→        const vb = detectValueBet(event, mk, event.sport);
+  1087→      if (vb) {
+  1088→        vb.eventName = eventName;
+  1089→        bets.push(vb);
+  1090→      }
+  1091→    }
+  1092→  }
+  1093→  return bets.sort((a, b) => b.kelly - a.kelly || b.gap - a.gap).slice(0, maxBets);
+  1094→}
+  1095→
+  1096→/** Find a sharp bookmaker price entry in collected prices.
+  1097→ * Returns the first entry from Pinnacle/Betfair, or null. */
+  1098→function findSharpPrice(allPrices) {
+  1099→  for (const entries of Object.values(allPrices)) {
+  1100→    const sharp = entries.find(e => SHARP_BOOKMAKER_NAMES.has(e.bookmaker));
+  1101→    if (sharp) return sharp;
+  1102→  }
+  1103→  return null;
+  1104→}
+  1105→
+  1106→module.exports = {
+  1107→  MIN_VALUE_EDGE,
+  1108→  MAX_ARB_EDGE,
+  1109→  MARKET_OUTCOMES,
+  1110→  MARKET_LABELS,
+  1111→  MARKET_DESCRIPTIONS,
+  1112→  OUTCOME_LABELS,
+  1113→  getMarketLabel,
+  1114→  describeMarket,
+  1115→  getOutcomeLabel,
+  1116→  impliedProb,
+  1117→  calculateNoVigMarket,
+  1118→  getEventMarkets,
+  1119→  findBestPrices,
+  1120→  collectAllPrices,
+  1121→  detectArbitrage,
+  1122→  detectCrossMarketArbitrage,
+  1123→  detectMiddleBets,
+  1124→  detectHandicapArbitrage,
+  1125→  detectBttsTeamScoreArbitrage,
+  1126→  detectTeamMatchTotalArbitrage,
+  1127→  classifyConfidence,
+  1128→  detectValueBet,
+  1129→  getAllOpportunities,
+  1130→  getValueBets,
+  1131→  buildEventIndex,
+  1132→  getSettlementScope,
+  1133→  SHARP_BOOKMAKER_NAMES,
+  1134→};
+  1135→
