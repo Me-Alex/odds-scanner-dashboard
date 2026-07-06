@@ -7,21 +7,19 @@ import DashboardPage from '@/components/dashboard-page';
 import AdminPage from '@/components/admin-page';
 import SubscriptionPage from '@/components/subscription-page';
 import { Button } from '@/components/ui/button';
-import { Radar, Crown, LogOut, Shield, CreditCard } from 'lucide-react';
+import { Crown, LogOut, Shield, CreditCard } from 'lucide-react';
 
-type AppView = 'loading' | 'login' | 'dashboard' | 'admin' | 'subscription';
+type AppView = 'login' | 'dashboard' | 'admin' | 'subscription';
 
 export default function Home() {
-  const { user, isAuthenticated, isAdmin, isLoading, checkSession, logout } = useAuthStore();
-  const [view, setView] = useState<AppView>('loading');
+  const { user, isAuthenticated, isAdmin, checkSession, logout } = useAuthStore();
+  const [view, setView] = useState<AppView>('login');
 
   useEffect(() => {
     checkSession().finally(() => {
       const { isAuthenticated: authed } = useAuthStore.getState();
       if (authed) {
         setView('dashboard');
-      } else {
-        setView('login');
       }
     });
   }, []);
@@ -38,20 +36,6 @@ export default function Home() {
   const handleGoToAdmin = useCallback(() => setView('admin'), []);
   const handleGoToSubscription = useCallback(() => setView('subscription'), []);
   const handleBackToDashboard = useCallback(() => setView('dashboard'), []);
-
-  if (view === 'loading') {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: '#0d1117' }}>
-        <div className="flex flex-col items-center gap-4">
-          <div className="relative">
-            <Radar className="w-16 h-16 text-emerald-500 animate-pulse" />
-            <div className="absolute inset-0 w-16 h-16 border-2 border-emerald-500/30 rounded-full animate-ping" />
-          </div>
-          <p className="text-gray-400 text-sm">Loading Arb Desk...</p>
-        </div>
-      </div>
-    );
-  }
 
   if (view === 'login') {
     return <LoginPage onAuthSuccess={handleAuthSuccess} />;
@@ -82,7 +66,6 @@ export default function Home() {
   if (view === 'dashboard' && isAuthenticated) {
     return (
       <div className="relative">
-        {/* Floating top-right controls */}
         <div className="fixed top-3 right-3 z-50 flex items-center gap-2">
           {isAdmin && (
             <Button

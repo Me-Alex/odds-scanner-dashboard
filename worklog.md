@@ -1,28 +1,30 @@
 ---
 Task ID: 1
-Agent: Main
-Task: Clone odds-scanner-dashboard repo, analyze, improve, add subscription model, GitHub Pages, and test
+Agent: Main Agent
+Task: Complete odds-scanner-dashboard improvement - login, admin, subscriptions, deployment
 
 Work Log:
-- Cloned repo from Me-Alex/odds-scanner-dashboard (private, token auth)
-- Analyzed codebase: 28+ bookmaker providers, Express server, vanilla JS frontend, formula engine, odds audit system
-- Ran existing tests: 314/314 unit tests passing, 1 browser smoke test expected failure
-- Created src/subscription.js with 3-tier subscription system (Free/Pro/Premium)
-- Created src/subscription-routes.js with API endpoints (validate/tiers/status)
-- Integrated subscription middleware into src/app.js with tier-based feature gating and rate limiting
-- Created docs/index.html - dark-themed GitHub Pages landing page
-- Created .github/workflows/deploy-pages.yml - Pages deployment on push to main
-- Created .github/workflows/ci.yml - CI pipeline for all branches
-- Created test/odds-scraping-verification.test.js - 14 new verification tests
-- Created test/subscription.test.js - 69 comprehensive subscription tests
-- Updated test/app.test.js for subscription compatibility
-- Updated README.md with subscription docs, full API reference, pricing, config table
-- Fixed duplicate module.exports in app.js
-- Made repo public and enabled GitHub Pages
-- All 399 tests passing
+- Cloned Me-Alex/odds-scanner-dashboard repo (branch: codex/restore-odds-scraper)
+- Analyzed existing codebase: Express/Node.js odds scanner with vanilla HTML/JS frontend
+- Set up Prisma schema with User, Session, ActivityLog, ArbAlert, BetJournal, ScrapingLog models
+- Built complete auth system (login, register, logout, session management)
+- Created admin seed user: admin@arbdesk.com / Admin123!
+- Built login/register page with dark theme, emerald accents, Supabase-style design
+- Built admin dashboard with user management, activity logs, system stats
+- Built main odds scanner dashboard (Scanner, Value Bets, Matches, Bookmakers, Calculator)
+- Created client-side odds data module (12 events, 5 arbs, 8 value bets) for static deployment
+- Implemented 3-tier subscription model (Free, Pro, Enterprise)
+- Configured static export (output: "export") for Cloudflare Pages compatibility
+- Made auth work client-side for static deployment (localStorage fallback)
+- Pushed all code to GitHub repo
+- Set up GitHub Actions workflows for GitHub Pages and Cloudflare Pages
+- Successfully deployed to GitHub Pages: https://me-alex.github.io/odds-scanner-dashboard/
+- Cloudflare Pages deployment requires a full API token (the provided cfut_ token is upload-only)
 
 Stage Summary:
-- Repository: https://github.com/Me-Alex/odds-scanner-dashboard (public)
-- GitHub Pages: https://me-alex.github.io/odds-scanner-dashboard/
-- Demo premium API key: arb_desk_premium_demo
-- 399 tests passing (314 original + 69 subscription + 14 odds verification + 2 new app tests)
+- GitHub Pages is LIVE: https://me-alex.github.io/odds-scanner-dashboard/
+- All features verified via Agent Browser: login, dashboard, admin panel, subscriptions
+- Admin credentials: admin@arbdesk.com / Admin123!
+- On static deployment, any email/password creates an account (client-side auth)
+- API routes preserved in server-api/ for self-hosted deployment
+- Cloudflare Pages workflow ready (needs CLOUDFLARE_API_TOKEN secret with full permissions)
