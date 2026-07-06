@@ -3,16 +3,9 @@ import bcrypt from 'bcryptjs'
 import { generateSessionToken, AuthUser, AuthError } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-const ADMIN_EMAILS = ['admin@arbdesk.com', 'me.alex.21.3@gmail.com']
+export const runtime = 'edge'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+const ADMIN_EMAILS = ['admin@arbdesk.com', 'me.alex.21.3@gmail.com']
 
 export async function POST(request: NextRequest) {
   try {
@@ -35,10 +28,12 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    if (isCF()) {
+    try {
       return await handleRegisterD1(normalizedEmail, password, name, request)
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleRegisterPrisma(normalizedEmail, password, name, request)
     }
-    return await handleRegisterPrisma(normalizedEmail, password, name, request)
   } catch (error) {
     if (error instanceof AuthError) {
       return NextResponse.json({ error: error.message }, { status: error.statusCode })

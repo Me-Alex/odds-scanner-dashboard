@@ -29,18 +29,8 @@ export type Env = {
   DB: D1Database
 }
 
-// Detect if we're running in Cloudflare Workers
-export function isCloudflare(): boolean {
-  try {
-    // In Cloudflare Workers, globalThis does not have process
-    // @ts-expect-error - checking for Cloudflare Workers environment
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
-
 // Get the D1 database binding from Cloudflare Workers environment
+// Throws if not running on Cloudflare Pages (callers should catch and fall back to Prisma)
 export async function getD1(): Promise<D1Database> {
   // Dynamic import to avoid bundling in non-Cloudflare environments
   const { getRequestContext } = await import('@cloudflare/next-on-pages')

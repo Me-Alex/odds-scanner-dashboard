@@ -2,14 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminFromRequest } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,10 +11,12 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url)
     const search = searchParams.get('search')?.trim()
 
-    if (isCF()) {
+    try {
       return await handleUsersD1(search)
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleUsersPrisma(search)
     }
-    return await handleUsersPrisma(search)
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Internal server error'
     const status = (error as { statusCode?: number })?.statusCode ?? 500

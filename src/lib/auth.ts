@@ -13,22 +13,6 @@ export interface AuthUser {
   updatedAt: string
 }
 
-// ─── Environment Detection ────────────────────────────────────────────
-
-let _isCloudflare: boolean | null = null
-
-function detectCloudflare(): boolean {
-  if (_isCloudflare !== null) return _isCloudflare
-  try {
-    // In Cloudflare Workers, globalThis does not have process
-    // @ts-expect-error - checking for Cloudflare environment
-    _isCloudflare = typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    _isCloudflare = true
-  }
-  return _isCloudflare
-}
-
 // ─── D1 Token Verification (Cloudflare) ───────────────────────────────
 
 async function verifyTokenD1(token: string): Promise<AuthUser | null> {
@@ -99,15 +83,13 @@ async function verifyTokenPrisma(token: string): Promise<AuthUser | null> {
 // ─── Unified Verify ───────────────────────────────────────────────────
 
 export async function verifyToken(token: string): Promise<AuthUser | null> {
-  if (detectCloudflare()) {
-    try {
-      return await verifyTokenD1(token)
-    } catch {
-      // Fallback to Prisma if D1 fails
-      return verifyTokenPrisma(token)
-    }
+  // Try D1 first (Cloudflare), fall back to Prisma (local dev)
+  // nodejs_compat polyfills process.versions.node, so we can't use that for detection
+  try {
+    return await verifyTokenD1(token)
+  } catch {
+    return verifyTokenPrisma(token)
   }
-  return verifyTokenPrisma(token)
 }
 
 export async function requireAuth(): Promise<AuthUser> {

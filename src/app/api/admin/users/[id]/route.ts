@@ -2,14 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminFromRequest } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function PATCH(
   request: NextRequest,
@@ -22,10 +15,12 @@ export async function PATCH(
     const body = await request.json()
     const { subscriptionTier, role, isActive } = body
 
-    if (isCF()) {
+    try {
       return await handleUpdateD1(id, body, admin)
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleUpdatePrisma(id, body, admin)
     }
-    return await handleUpdatePrisma(id, body, admin)
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Internal server error'
     const status = (error as { statusCode?: number })?.statusCode ?? 500

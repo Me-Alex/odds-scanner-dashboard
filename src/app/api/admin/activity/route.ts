@@ -2,23 +2,18 @@ import { NextResponse } from 'next/server'
 import { requireAdminFromRequest } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function GET(request: Request) {
   try {
     await requireAdminFromRequest(request)
 
-    if (isCF()) {
+    try {
       return await handleActivityD1()
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleActivityPrisma()
     }
-    return await handleActivityPrisma()
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Internal server error'
     const status = (error as { statusCode?: number })?.statusCode ?? 500

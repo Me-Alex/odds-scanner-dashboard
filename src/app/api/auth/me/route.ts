@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuthFromRequest, getTokenFromRequest, AuthError } from '@/lib/auth'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function GET(request: NextRequest) {
   try {
@@ -19,15 +12,12 @@ export async function GET(request: NextRequest) {
     if (token) {
       const newExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
 
-      if (isCF()) {
-        try {
-          const D1 = await import('@/lib/cloudflare-db')
-          const db = await D1.getD1()
-          await D1.updateSessionExpiry(db, token, user.id, newExpiresAt)
-        } catch {
-          // If D1 refresh fails, still return the user
-        }
-      } else {
+      try {
+        const D1 = await import('@/lib/cloudflare-db')
+        const db = await D1.getD1()
+        await D1.updateSessionExpiry(db, token, user.id, newExpiresAt)
+      } catch {
+        // D1 not available (local dev) — fall back to Prisma
         const { db } = await import('@/lib/db')
         await db.session.updateMany({
           where: { token, userId: user.id },

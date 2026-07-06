@@ -3,15 +3,7 @@ import bcrypt from 'bcryptjs'
 import { generateSessionToken, AuthUser, AuthError } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-// Environment detection
-function isCF(): boolean {
-  try {
-    // @ts-expect-error - checking for Cloudflare Workers environment
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,10 +19,12 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    if (isCF()) {
+    try {
       return await handleLoginD1(normalizedEmail, password, request)
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleLoginPrisma(normalizedEmail, password, request)
     }
-    return await handleLoginPrisma(normalizedEmail, password, request)
   } catch (error) {
     if (error instanceof AuthError) {
       return NextResponse.json({ error: error.message }, { status: error.statusCode })

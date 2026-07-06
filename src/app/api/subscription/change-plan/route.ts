@@ -2,16 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAuthFromRequest, AuthUser } from '@/lib/auth'
 import * as D1 from '@/lib/cloudflare-db'
 
-const VALID_TIERS = ['free', 'pro', 'enterprise'] as const
+export const runtime = 'edge'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+const VALID_TIERS = ['free', 'pro', 'enterprise'] as const
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,10 +20,12 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (isCF()) {
+    try {
       return await handleChangePlanD1(authUser, tier)
+    } catch {
+      // D1 not available (local dev) — fall back to Prisma
+      return await handleChangePlanPrisma(authUser, tier)
     }
-    return await handleChangePlanPrisma(authUser, tier)
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Internal server error'
     const status = (error as { statusCode?: number })?.statusCode ?? 500

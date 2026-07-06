@@ -1,25 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTokenFromRequest } from '@/lib/auth'
 
-function isCF(): boolean {
-  try {
-    // @ts-expect-error
-    return typeof process === 'undefined' || !process.versions?.node
-  } catch {
-    return true
-  }
-}
+export const runtime = 'edge'
 
 export async function POST(request: NextRequest) {
   try {
     const token = await getTokenFromRequest(request)
 
     if (token) {
-      if (isCF()) {
+      try {
         const D1 = await import('@/lib/cloudflare-db')
         const db = await D1.getD1()
         await D1.deleteSession(db, token)
-      } else {
+      } catch {
+        // D1 not available (local dev) — fall back to Prisma
         const { db } = await import('@/lib/db')
         await db.session.deleteMany({ where: { token } })
       }
