@@ -1,0 +1,11 @@
+name = "arb-desk"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".vercel/output/static"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "arb-desk-db"
+database_id = "PLACEHOLDER"
+# Replace PLACEHOLDER with actual database_id after running:
+# CLOUDFLARE_API_TOKEN=<token> npx wrangler d1 create arb-desk-db

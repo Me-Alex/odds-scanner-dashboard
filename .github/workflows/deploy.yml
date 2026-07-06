@@ -1,8 +1,8 @@
-name: Deploy to GitHub Pages
+name: Deploy to GitHub Pages & Cloudflare
 
 on:
   push:
-    branches: [main, codex/restore-odds-scraper]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -23,10 +23,31 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Temporarily move API routes for static build
+        run: mv src/app/api /tmp/api-routes-backup
+
+      - name: Use static export config
+        run: |
+          cat > next.config.ts << 'CONFIG'
+          import type { NextConfig } from "next";
+          const nextConfig: NextConfig = {
+            output: "export",
+            images: { unoptimized: true },
+            typescript: { ignoreBuildErrors: true },
+            reactStrictMode: false,
+          };
+          export default nextConfig;
+          CONFIG
+
       - name: Build static site
         run: bun run build
         env:
           NODE_ENV: production
+
+      - name: Restore API routes and server config
+        run: |
+          mv /tmp/api-routes-backup src/app/api
+          git checkout next.config.ts || true
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
@@ -34,3 +55,10 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./out
           publish_branch: gh-pages
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: 5af2a80e53141e61fafbb9c45fe9ac2d
+          command: pages deploy out --project-name=arb-desk --commit-dirty=true

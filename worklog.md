@@ -81,3 +81,22 @@ Stage Summary:
 - Frontend correctly calls API endpoints
 - Lint: 0 errors
 - Migration from demo/static mode to real API mode complete
+---
+Task ID: cloudflare-deploy
+Agent: main
+Task: Fix preview error and deploy to Cloudflare Pages
+
+Work Log:
+- Identified Turbopack cross-origin bug causing dev server crashes in sandbox
+- Workaround: pre-compile all routes via Python before browser access, use Caddy proxy (port 81)
+- Production build works perfectly with all 11 API routes
+- Cloudflare D1 database creation failed (token lacks D1 permissions)
+- Deployed static build to Cloudflare Pages at https://545b1dbf.arb-desk.pages.dev
+- Updated GitHub workflow to deploy to both GitHub Pages and Cloudflare Pages
+- Created deploy-cloudflare.sh script for manual Cloudflare deployments
+- Verified landing page renders correctly in preview panel
+
+Stage Summary:
+- Dev server: works with pre-compilation workaround (all routes compiled before browser access)
+- Cloudflare Pages: static UI deployed (API endpoints require D1 database - needs token with D1 permissions)
+- GitHub workflow: updated to deploy to both GitHub Pages and Cloudflare Pages on push to main

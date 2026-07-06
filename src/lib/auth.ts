@@ -1,5 +1,5 @@
-import { db } from '@/lib/db'
 import { cookies } from 'next/headers'
+import * as D1Helpers from '@/lib/cloudflare-db'
 
 export interface AuthUser {
   id: string
@@ -13,16 +13,69 @@ export interface AuthUser {
   updatedAt: string
 }
 
-export async function verifyToken(token: string): Promise<AuthUser | null> {
+// ─── Environment Detection ────────────────────────────────────────────
+
+let _isCloudflare: boolean | null = null
+
+function detectCloudflare(): boolean {
+  if (_isCloudflare !== null) return _isCloudflare
+  try {
+    // In Cloudflare Workers, globalThis does not have process
+    // @ts-expect-error - checking for Cloudflare environment
+    _isCloudflare = typeof process === 'undefined' || !process.versions?.node
+  } catch {
+    _isCloudflare = true
+  }
+  return _isCloudflare
+}
+
+// ─── D1 Token Verification (Cloudflare) ───────────────────────────────
+
+async function verifyTokenD1(token: string): Promise<AuthUser | null> {
   if (!token) return null
 
+  const d1 = await D1Helpers.getD1()
+  const row = await D1Helpers.getUserByToken(d1, token)
+
+  if (!row) return null
+
+  // D1 returns these from the JOIN query
+  const data = row as Record<string, unknown>
+
+  const expiresAt = data.sessionExpiresAt as string
+  const isActive = data.isActive === 1 || data.isActive === true
+
+  if (new Date(expiresAt) < new Date() || !isActive) {
+    // Clean up expired session
+    await D1Helpers.deleteSession(d1, token)
+    return null
+  }
+
+  return {
+    id: data.id as string,
+    email: data.email as string,
+    name: (data.name as string) || null,
+    role: data.role as string,
+    subscriptionTier: data.subscriptionTier as string,
+    subscriptionExpiresAt: (data.subscriptionExpiresAt as string) || null,
+    isActive,
+    createdAt: data.createdAt as string,
+    updatedAt: data.updatedAt as string,
+  }
+}
+
+// ─── Prisma Token Verification (Local Dev) ────────────────────────────
+
+async function verifyTokenPrisma(token: string): Promise<AuthUser | null> {
+  if (!token) return null
+
+  const { db } = await import('@/lib/db')
   const session = await db.session.findUnique({
     where: { token },
     include: { user: true },
   })
 
   if (!session || session.expiresAt < new Date() || !session.user.isActive) {
-    // Clean up expired session
     if (session) {
       await db.session.delete({ where: { id: session.id } })
     }
@@ -41,6 +94,20 @@ export async function verifyToken(token: string): Promise<AuthUser | null> {
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
   }
+}
+
+// ─── Unified Verify ───────────────────────────────────────────────────
+
+export async function verifyToken(token: string): Promise<AuthUser | null> {
+  if (detectCloudflare()) {
+    try {
+      return await verifyTokenD1(token)
+    } catch {
+      // Fallback to Prisma if D1 fails
+      return verifyTokenPrisma(token)
+    }
+  }
+  return verifyTokenPrisma(token)
 }
 
 export async function requireAuth(): Promise<AuthUser> {
