@@ -24,7 +24,7 @@ import {
   Crown,
 } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
-import { generateOddsData } from '@/lib/odds-data'
+// Data fetched from /api/odds endpoint
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -1126,19 +1126,20 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
   const { user, isAdmin, logout } = useAuthStore()
 
   const fetchData = useCallback(async () => {
+    setLoading(true)
+    setRefreshing(true)
     try {
-      setLoading(true)
-      setRefreshing(true)
-      const res = await fetch('/api/odds')
+      const token = useAuthStore.getState().token
+      const res = await fetch('/api/odds', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       if (res.ok) {
         const json = await res.json()
         setData(json)
-        return
       }
     } catch {
-      // fetch failed, fall back to client-side generation
+      // fetch failed
     }
-    setData(generateOddsData())
     setLoading(false)
     setRefreshing(false)
   }, [])

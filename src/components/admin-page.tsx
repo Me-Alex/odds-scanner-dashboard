@@ -33,6 +33,7 @@ import {
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import { Skeleton } from '@/components/ui/skeleton'
+import { toast } from 'sonner'
 import {
   Users,
   Shield,
@@ -75,10 +76,6 @@ interface AdminUser {
   updatedAt: string
 }
 
-interface LocalUser extends AdminUser {
-  passwordHash: string
-}
-
 interface ActivityEntry {
   id: string
   userEmail: string
@@ -101,7 +98,6 @@ interface ScrapingEntry {
 // --- Helpers ---
 
 const TOKEN_KEY = 'arbdesk_token'
-const LOCAL_USERS_KEY = 'arbdesk_local_users'
 
 function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -118,91 +114,6 @@ function formatDateTime(dateStr: string | null): string {
 function getAuthToken(): string | null {
   if (typeof window === 'undefined') return null
   return localStorage.getItem(TOKEN_KEY)
-}
-
-function loadLocalUsers(): LocalUser[] {
-  if (typeof window === 'undefined') return []
-  const raw = localStorage.getItem(LOCAL_USERS_KEY)
-  if (!raw) return []
-  try {
-    return JSON.parse(raw) as LocalUser[]
-  } catch {
-    return []
-  }
-}
-
-function saveLocalUsers(users: LocalUser[]) {
-  if (typeof window === 'undefined') return
-  localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users))
-}
-
-function localUsersToAdminUsers(users: LocalUser[]): AdminUser[] {
-  return users.map(({ passwordHash: _, ...u }) => u)
-}
-
-function deriveStatsFromLocalUsers(users: LocalUser[]): AdminStats {
-  const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
-
-  return {
-    totalUsers: users.length,
-    activeUsers: users.filter(u => u.isActive).length,
-    proUsers: users.filter(u => u.subscriptionTier === 'pro' && u.isActive).length,
-    enterpriseUsers: users.filter(u => u.subscriptionTier === 'enterprise' && u.isActive).length,
-    totalBets: users.length * 14,
-    totalArbs: users.filter(u => u.subscriptionTier !== 'free').length * 6,
-    recentScrapes: 48,
-    newUsersToday: users.filter(u => u.createdAt >= startOfToday).length,
-  }
-}
-
-function generateDemoActivities(users: AdminUser[]): ActivityEntry[] {
-  const actions = [
-    { action: 'login', detail: 'User logged in successfully' },
-    { action: 'page_view', detail: 'Viewed scanner dashboard' },
-    { action: 'arb_alert', detail: 'Received arb opportunity alert' },
-    { action: 'bet_tracked', detail: 'Tracked a new bet' },
-    { action: 'subscription_change', detail: 'Subscription tier updated' },
-    { action: 'register', detail: 'Created a new account' },
-    { action: 'logout', detail: 'User logged out' },
-  ]
-
-  const ips = [
-    '192.168.1.42', '10.0.0.15', '172.16.0.88', '203.0.113.50',
-    '198.51.100.23', '85.214.132.117', '104.26.7.91', '35.190.12.4',
-  ]
-
-  if (users.length === 0) {
-    const now = Date.now()
-    return actions.map((a, i) => ({
-      id: `demo-act-${i}`,
-      userEmail: 'admin@arbdesk.com',
-      userName: 'Admin',
-      action: a.action,
-      details: a.detail,
-      ipAddress: ips[i % ips.length],
-      createdAt: new Date(now - i * 3600000 * 2).toISOString(),
-    }))
-  }
-
-  const now = Date.now()
-  const entries: ActivityEntry[] = []
-  for (let i = 0; i < Math.min(users.length * 3, 20); i++) {
-    const user = users[i % users.length]
-    const act = actions[i % actions.length]
-    const hoursAgo = i * 1.5 + Math.random() * 2
-    entries.push({
-      id: `local-act-${i}`,
-      userEmail: user.email,
-      userName: user.name,
-      action: act.action,
-      details: act.detail,
-      ipAddress: ips[i % ips.length],
-      createdAt: new Date(now - hoursAgo * 3600000).toISOString(),
-    })
-  }
-
-  return entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
 }
 
 async function fetchAdmin<T>(path: string): Promise<T | null> {
@@ -228,22 +139,28 @@ export default function AdminPage() {
   const [scrapingLogs, setScrapingLogs] = useState<ScrapingEntry[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
-  const [isStaticMode, setIsStaticMode] = useState(false)
 
-  // Load stats with fallback
+  // Load stats
   useEffect(() => {
     fetchAdmin<{ stats: AdminStats }>('/api/admin/stats').then((data) => {
       if (data) {
         setStats(data.stats)
       } else {
-        const localUsers = loadLocalUsers()
-        setStats(deriveStatsFromLocalUsers(localUsers))
-        setIsStaticMode(true)
+        setStats({
+          totalUsers: 0,
+          activeUsers: 0,
+          proUsers: 0,
+          enterpriseUsers: 0,
+          totalBets: 0,
+          totalArbs: 0,
+          recentScrapes: 0,
+          newUsersToday: 0,
+        })
       }
     })
   }, [])
 
-  // Load users with fallback
+  // Load users
   const loadUsers = useCallback(async (search?: string) => {
     const query = search !== undefined ? search : searchQuery
     const url = query
@@ -253,18 +170,7 @@ export default function AdminPage() {
     if (data) {
       setUsers(data.users)
     } else {
-      const localUsers = loadLocalUsers()
-      let filtered = localUsersToAdminUsers(localUsers)
-      if (query) {
-        const q = query.toLowerCase()
-        filtered = filtered.filter(
-          (u) =>
-            u.email.toLowerCase().includes(q) ||
-            (u.name && u.name.toLowerCase().includes(q)),
-        )
-      }
-      setUsers(filtered)
-      setIsStaticMode(true)
+      setUsers([])
     }
   }, [searchQuery])
 
@@ -277,42 +183,27 @@ export default function AdminPage() {
     load()
   }, [loadUsers])
 
-  // Load activity with fallback
+  // Load activity
   useEffect(() => {
     fetchAdmin<{ activities: ActivityEntry[] }>('/api/admin/activity').then(
       (data) => {
         if (data) {
           setActivities(data.activities)
         } else {
-          const localUsers = localUsersToAdminUsers(loadLocalUsers())
-          setActivities(generateDemoActivities(localUsers))
+          setActivities([])
         }
       },
     )
   }, [])
 
-  // Load scraping logs with fallback
+  // Load scraping logs
   useEffect(() => {
     fetchAdmin<{ logs: ScrapingEntry[] }>('/api/admin/scraping-logs').then(
       (data) => {
         if (data) {
           setScrapingLogs(data.logs)
         } else {
-          const providers = ['Bet365', 'Pinnacle', 'DraftKings', 'FanDuel', 'BetMGM', 'Caesars']
-          const statuses = ['success', 'success', 'success', 'partial', 'error']
-          const now = Date.now()
-          const demoLogs: ScrapingEntry[] = providers.map((provider, i) => {
-            const status = statuses[i % statuses.length]
-            return {
-              id: `local-scrape-${i}`,
-              provider,
-              status,
-              eventsFound: status === 'error' ? 0 : 40 + Math.floor(Math.random() * 60),
-              durationMs: status === 'error' ? null : 800 + Math.floor(Math.random() * 2000),
-              createdAt: new Date(now - i * 7200000).toISOString(),
-            }
-          })
-          setScrapingLogs(demoLogs)
+          setScrapingLogs([])
         }
       },
     )
@@ -324,25 +215,8 @@ export default function AdminPage() {
     loadUsers(value)
   }
 
-  // User update — works for both API and localStorage
+  // User update via API
   const updateUser = async (userId: string, updates: Record<string, unknown>) => {
-    if (isStaticMode) {
-      const localUsers = loadLocalUsers()
-      const idx = localUsers.findIndex((u) => u.id === userId)
-      if (idx >= 0) {
-        localUsers[idx] = {
-          ...localUsers[idx],
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        }
-        saveLocalUsers(localUsers)
-        await loadUsers()
-        // Also refresh stats since they're derived from local users
-        setStats(deriveStatsFromLocalUsers(localUsers))
-      }
-      return
-    }
-
     const token = getAuthToken()
     if (!token) return
     try {
@@ -357,34 +231,11 @@ export default function AdminPage() {
       if (res.ok) {
         loadUsers()
       } else {
-        // API failed, fall back to localStorage
-        const localUsers = loadLocalUsers()
-        const idx = localUsers.findIndex((u) => u.id === userId)
-        if (idx >= 0) {
-          localUsers[idx] = {
-            ...localUsers[idx],
-            ...updates,
-            updatedAt: new Date().toISOString(),
-          }
-          saveLocalUsers(localUsers)
-          setUsers(localUsersToAdminUsers(localUsers))
-          setIsStaticMode(true)
-        }
+        const data = await res.json().catch(() => null)
+        toast.error(data?.error || 'Failed to update user')
       }
     } catch {
-      // Network error — update localStorage directly
-      const localUsers = loadLocalUsers()
-      const idx = localUsers.findIndex((u) => u.id === userId)
-      if (idx >= 0) {
-        localUsers[idx] = {
-          ...localUsers[idx],
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        }
-        saveLocalUsers(localUsers)
-        setUsers(localUsersToAdminUsers(localUsers))
-        setIsStaticMode(true)
-      }
+      toast.error('Network error while updating user')
     }
   }
 
@@ -437,11 +288,6 @@ export default function AdminPage() {
             <h1 className="text-2xl font-bold text-white">Admin Dashboard</h1>
             <p className="text-sm text-gray-400">
               Manage users, monitor activity, and view system status
-              {isStaticMode && (
-                <span className="ml-2 text-amber-400/80">
-                  (static mode — localStorage)
-                </span>
-              )}
             </p>
           </div>
         </div>
@@ -806,19 +652,19 @@ export default function AdminPage() {
                       <span className="text-gray-300">Status</span>
                       <Badge className="bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 border-0">
                         <CheckCircle className="h-3 w-3 mr-1" />
-                        {isStaticMode ? 'localStorage' : 'Operational'}
+                        Operational
                       </Badge>
                     </div>
                     <div className="flex items-center justify-between p-3 rounded-lg bg-[#0d1117] border border-[#30363d]">
                       <span className="text-gray-300">Engine</span>
                       <span className="text-gray-400 text-sm">
-                        {isStaticMode ? 'localStorage (in-browser)' : 'SQLite'}
+                        SQLite
                       </span>
                     </div>
                     <div className="flex items-center justify-between p-3 rounded-lg bg-[#0d1117] border border-[#30363d]">
                       <span className="text-gray-300">ORM</span>
                       <span className="text-gray-400 text-sm">
-                        {isStaticMode ? 'Client-side JS' : 'Prisma'}
+                        Prisma
                       </span>
                     </div>
                   </div>

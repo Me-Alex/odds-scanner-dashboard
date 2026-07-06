@@ -29,37 +29,6 @@ interface AuthState {
 const TOKEN_KEY = 'arbdesk_token'
 const USER_KEY = 'arbdesk_user'
 
-const ADMIN_EMAILS = ['admin@arbdesk.com', 'me.alex.21.3@gmail.com']
-
-const SEED_USERS = [
-  {
-    id: 'seed-admin-1',
-    email: 'admin@arbdesk.com',
-    name: 'Admin',
-    passwordHash: btoa('Admin123!'),
-    role: 'admin',
-    subscriptionTier: 'enterprise',
-    subscriptionExpiresAt: null,
-    isActive: true,
-    lastLoginAt: null,
-    createdAt: new Date('2025-01-01').toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: 'seed-admin-2',
-    email: 'me.alex.21.3@gmail.com',
-    name: 'Alex',
-    passwordHash: btoa('Alex123!'),
-    role: 'admin',
-    subscriptionTier: 'enterprise',
-    subscriptionExpiresAt: null,
-    isActive: true,
-    lastLoginAt: null,
-    createdAt: new Date('2025-01-01').toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-]
-
 async function authFetch(
   url: string,
   options: RequestInit = {},
@@ -135,42 +104,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAdmin: data.user.role === 'admin',
         isLoading: false,
       })
-    } catch {
-      // Fallback for static deployment: try client-side auth
-      const demoUsers = loadAllLocalUsers()
-      const found = demoUsers.find(u => u.email === email)
-      if (found && found.passwordHash === btoa(password)) {
-        const { passwordHash: _, ...user } = found
-        saveUserLocally(user as User, 'demo-token')
-        set({
-          user: user as User,
-          token: 'demo-token',
-          isAuthenticated: true,
-          isAdmin: (user as User).role === 'admin',
-          isLoading: false,
-        })
-        return
-      }
-      // Auto-create account on static site
-      const newUser: User = {
-        id: crypto.randomUUID(),
-        email,
-        name: email.split('@')[0],
-        role: ADMIN_EMAILS.includes(email) ? 'admin' : 'user',
-        subscriptionTier: ADMIN_EMAILS.includes(email) ? 'enterprise' : 'free',
-        subscriptionExpiresAt: null,
-        isActive: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-      saveLocalUser({ ...newUser, passwordHash: btoa(password) })
-      saveUserLocally(newUser, 'demo-token')
+    } catch (err) {
       set({
-        user: newUser,
-        token: 'demo-token',
-        isAuthenticated: true,
-        isAdmin: newUser.role === 'admin',
         isLoading: false,
+        error: err instanceof Error ? err.message : 'Login failed',
       })
     }
   },
@@ -192,27 +129,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAdmin: data.user.role === 'admin',
         isLoading: false,
       })
-    } catch {
-      // Fallback: create user locally
-      const newUser: User = {
-        id: crypto.randomUUID(),
-        email,
-        name,
-        role: 'user',
-        subscriptionTier: 'free',
-        subscriptionExpiresAt: null,
-        isActive: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-      saveLocalUser({ ...newUser, passwordHash: btoa(password) })
-      saveUserLocally(newUser, 'demo-token')
+    } catch (err) {
       set({
-        user: newUser,
-        token: 'demo-token',
-        isAuthenticated: true,
-        isAdmin: false,
         isLoading: false,
+        error: err instanceof Error ? err.message : 'Registration failed',
       })
     }
   },
@@ -281,52 +201,3 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   clearError: () => set({ error: null }),
 }))
 
-// Local user storage for static deployment
-interface LocalUser extends User {
-  passwordHash: string
-}
-
-function getLocalUsersKey() {
-  return 'arbdesk_local_users'
-}
-
-function loadAllLocalUsers(): LocalUser[] {
-  if (typeof window === 'undefined') return []
-  const raw = localStorage.getItem(getLocalUsersKey())
-  let users: LocalUser[] = []
-  if (raw) {
-    try {
-      users = JSON.parse(raw) as LocalUser[]
-    } catch {
-      users = []
-    }
-  }
-  // Ensure seed users always exist
-  for (const seed of SEED_USERS) {
-    const idx = users.findIndex(u => u.email === seed.email)
-    if (idx < 0) {
-      users.push(seed)
-    } else {
-      // Update role/tier if seed says admin/enterprise but local was downgraded
-      if (seed.role === 'admin') {
-        users[idx].role = 'admin'
-        users[idx].subscriptionTier = seed.subscriptionTier
-      }
-    }
-  }
-  // Save back
-  localStorage.setItem(getLocalUsersKey(), JSON.stringify(users))
-  return users
-}
-
-function saveLocalUser(user: LocalUser) {
-  if (typeof window === 'undefined') return
-  const users = loadAllLocalUsers()
-  const idx = users.findIndex(u => u.email === user.email)
-  if (idx >= 0) {
-    users[idx] = user
-  } else {
-    users.push(user)
-  }
-  localStorage.setItem(getLocalUsersKey(), JSON.stringify(users))
-}

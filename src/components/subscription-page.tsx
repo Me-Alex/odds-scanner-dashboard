@@ -115,39 +115,44 @@ export default function SubscriptionPage({ currentTier, onBack, onTierChange }: 
     return { label: 'Downgrade', disabled: false, variant: 'outline' as const }
   }
 
-  const handleCtaClick = (tierId: string) => {
+  const handleCtaClick = async (tierId: string) => {
     if (tierId.toLowerCase() === currentTier.toLowerCase()) return
 
-    // Update in localStorage
-    const usersKey = 'arbdesk_local_users'
-    if (typeof window !== 'undefined') {
-      const raw = localStorage.getItem(usersKey)
-      if (raw) {
-        try {
-          const users = JSON.parse(raw)
-          const idx = users.findIndex((u: any) => u.email === user?.email)
-          if (idx >= 0) {
-            users[idx].subscriptionTier = tierId.toLowerCase()
-            localStorage.setItem(usersKey, JSON.stringify(users))
-          }
-        } catch {}
+    try {
+      const token = useAuthStore.getState().token
+      const res = await fetch('/api/subscription/change-plan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ tier: tierId.toLowerCase() }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => null)
+        throw new Error(data?.error || 'Failed to change plan')
       }
+
+      // Update auth store with new tier
+      if (user) {
+        const updatedUser = { ...user, subscriptionTier: tierId.toLowerCase() }
+        useAuthStore.setState({ user: updatedUser })
+        // Persist to localStorage for session caching
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('arbdesk_user', JSON.stringify(updatedUser))
+        }
+      }
+
+      // Notify parent
+      onTierChange?.(tierId.toLowerCase())
+
+      toast.success(`Plan changed to ${tierId}`, {
+        description: 'Your subscription has been updated.',
+        duration: 3000,
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to change plan')
     }
-
-    // Update in auth store
-    if (user) {
-      const updatedUser = { ...user, subscriptionTier: tierId.toLowerCase() }
-      localStorage.setItem('arbdesk_user', JSON.stringify(updatedUser))
-      useAuthStore.setState({ user: updatedUser })
-    }
-
-    // Notify parent
-    onTierChange?.(tierId.toLowerCase())
-
-    toast.success(`Plan changed to ${tierId}`, {
-      description: 'Your subscription has been updated.',
-      duration: 3000,
-    })
   }
 
   return (

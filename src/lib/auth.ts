@@ -1,137 +1,123 @@
-import bcrypt from 'bcryptjs'
-import crypto from 'crypto'
 import { db } from '@/lib/db'
+import { cookies } from 'next/headers'
 
-const SESSION_EXPIRY_DAYS = 7
-
-/**
- * Hash a plain-text password using bcrypt.
- */
-export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 12)
+export interface AuthUser {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  subscriptionTier: string
+  subscriptionExpiresAt: string | null
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
 }
 
-/**
- * Verify a plain-text password against a stored hash.
- */
-export async function verifyPassword(
-  password: string,
-  hash: string,
-): Promise<boolean> {
-  return bcrypt.compare(password, hash)
-}
+export async function verifyToken(token: string): Promise<AuthUser | null> {
+  if (!token) return null
 
-/**
- * Create a new session token (random 32-byte hex string).
- */
-export function createSessionToken(): string {
-  return crypto.randomBytes(32).toString('hex')
-}
-
-/**
- * Create a session in the database for a given user.
- * Returns the token string.
- */
-export async function createSession(
-  userId: string,
-): Promise<string> {
-  const token = createSessionToken()
-  const expiresAt = new Date()
-  expiresAt.setDate(expiresAt.getDate() + SESSION_EXPIRY_DAYS)
-
-  await db.session.create({
-    data: {
-      userId,
-      token,
-      expiresAt,
-    },
-  })
-
-  return token
-}
-
-/**
- * Verify a session token and return the associated session with user.
- * Returns null if the session is invalid, expired, or not found.
- */
-export async function verifySession(
-  token: string,
-) {
   const session = await db.session.findUnique({
     where: { token },
     include: { user: true },
   })
 
-  if (!session) return null
-
-  if (new Date() > session.expiresAt) {
+  if (!session || session.expiresAt < new Date() || !session.user.isActive) {
     // Clean up expired session
-    await db.session.delete({ where: { id: session.id } })
+    if (session) {
+      await db.session.delete({ where: { id: session.id } })
+    }
     return null
   }
 
-  return session
-}
-
-/**
- * Create an activity log entry.
- */
-export async function createActivityLog(params: {
-  userId: string
-  action: string
-  details?: string
-  ipAddress?: string | null
-}): Promise<void> {
-  await db.activityLog.create({
-    data: {
-      userId: params.userId,
-      action: params.action,
-      details: params.details ?? null,
-      ipAddress: params.ipAddress ?? null,
-    },
-  })
-}
-
-/**
- * Extract the Bearer token from the Authorization header.
- * Returns null if no valid token is found.
- */
-function extractBearerToken(authHeader: string | null): string | null {
-  if (!authHeader) return null
-  const parts = authHeader.split(' ')
-  if (parts.length !== 2 || parts[0] !== 'Bearer') return null
-  return parts[1]
-}
-
-/**
- * Get the current authenticated user from a Request object.
- * Checks the Authorization header for a Bearer token and validates the session.
- * Returns the user object (without passwordHash) or null.
- */
-export async function getCurrentUser(request: Request) {
-  const authHeader = request.headers.get('Authorization')
-  const token = extractBearerToken(authHeader)
-
-  if (!token) return null
-
-  const session = await verifySession(token)
-  if (!session) return null
-
-  // Check if user is active
-  if (!session.user.isActive) return null
-
-  // Omit passwordHash from the returned user
-  const { passwordHash: _, ...userWithoutPassword } = session.user
-  return userWithoutPassword
-}
-
-/**
- * Get the client IP address from request headers.
- */
-export function getClientIp(request: Request): string | null {
-  const forwarded = request.headers.get('x-forwarded-for')
-  if (forwarded) {
-    return forwarded.split(',')[0]?.trim() ?? null
+  const user = session.user
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    subscriptionTier: user.subscriptionTier,
+    subscriptionExpiresAt: user.subscriptionExpiresAt?.toISOString() ?? null,
+    isActive: user.isActive,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
   }
-  return request.headers.get('x-real-ip') ?? null
+}
+
+export async function requireAuth(): Promise<AuthUser> {
+  const cookieStore = await cookies()
+  const token = cookieStore.get('arbdesk_token')?.value
+
+  if (!token) {
+    throw new AuthError('Unauthorized', 401)
+  }
+
+  const user = await verifyToken(token)
+  if (!user) {
+    throw new AuthError('Invalid or expired session', 401)
+  }
+
+  return user
+}
+
+export async function requireAdmin(): Promise<AuthUser> {
+  const user = await requireAuth()
+  if (user.role !== 'admin') {
+    throw new AuthError('Admin access required', 403)
+  }
+  return user
+}
+
+export async function getTokenFromRequest(request: Request): Promise<string | null> {
+  // Try Authorization header first
+  const authHeader = request.headers.get('Authorization')
+  if (authHeader?.startsWith('Bearer ')) {
+    return authHeader.slice(7)
+  }
+
+  // Try cookie
+  const cookieHeader = request.headers.get('Cookie')
+  if (cookieHeader) {
+    const match = cookieHeader.match(/arbdesk_token=([^;]+)/)
+    if (match) return match[1]
+  }
+
+  return null
+}
+
+export async function requireAuthFromRequest(request: Request): Promise<AuthUser> {
+  const token = await getTokenFromRequest(request)
+
+  if (!token) {
+    throw new AuthError('Unauthorized', 401)
+  }
+
+  const user = await verifyToken(token)
+  if (!user) {
+    throw new AuthError('Invalid or expired session', 401)
+  }
+
+  return user
+}
+
+export async function requireAdminFromRequest(request: Request): Promise<AuthUser> {
+  const user = await requireAuthFromRequest(request)
+  if (user.role !== 'admin') {
+    throw new AuthError('Admin access required', 403)
+  }
+  return user
+}
+
+export class AuthError extends Error {
+  statusCode: number
+  constructor(message: string, statusCode: number) {
+    super(message)
+    this.statusCode = statusCode
+    this.name = 'AuthError'
+  }
+}
+
+export function generateSessionToken(): string {
+  const array = new Uint8Array(32)
+  crypto.getRandomValues(array)
+  return Array.from(array, (b) => b.toString(16).padStart(2, '0')).join('')
 }
