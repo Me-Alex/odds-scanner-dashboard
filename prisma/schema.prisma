@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,19 +8,83 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  passwordHash         String?
+  name                 String?
+  role                 String    @default("user") // "user" | "admin"
+  subscriptionTier     String    @default("free") // "free" | "pro" | "enterprise"
+  subscriptionExpiresAt DateTime?
+  isActive             Boolean   @default(true)
+  lastLoginAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  sessions             Session[]
+  activityLogs         ActivityLog[]
 }
 
-model Post {
+model Session {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  details   String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ArbAlert {
+  id          String   @id @default(cuid())
+  eventId     String
+  homeTeam    String
+  awayTeam    String
+  competition String
+  sport       String
+  edge        Float
+  bookmaker1  String
+  bookmaker2  String
+  marketType  String
+  seen        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model BetJournal {
+  id          String   @id @default(cuid())
+  userId      String?
+  eventId     String?
+  homeTeam    String
+  awayTeam    String
+  competition String?
+  sport       String?
+  bookmaker   String
+  market      String
+  selection   String
+  odds        Float
+  stake       Float
+  result      String?  // "pending" | "won" | "lost" | "void"
+  payout      Float?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ScrapingLog {
+  id            String   @id @default(cuid())
+  provider      String
+  status        String   // "success" | "error" | "partial"
+  eventsFound   Int      @default(0)
+  errorMsg      String?
+  durationMs    Int?
+  createdAt     DateTime @default(now())
 }
