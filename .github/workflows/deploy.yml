@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [codex/restore-odds-scraper]
+    branches: [main, codex/restore-odds-scraper]
   workflow_dispatch:
 
 permissions:
