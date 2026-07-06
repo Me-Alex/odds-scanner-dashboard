@@ -100,3 +100,28 @@ Stage Summary:
 - Dev server: works with pre-compilation workaround (all routes compiled before browser access)
 - Cloudflare Pages: static UI deployed (API endpoints require D1 database - needs token with D1 permissions)
 - GitHub workflow: updated to deploy to both GitHub Pages and Cloudflare Pages on push to main
+---
+Task ID: cloudflare-d1-deploy
+Agent: main
+Task: Full Cloudflare Pages deployment with D1 database backend
+
+Work Log:
+- Created D1 database "arb-desk-db" (ID: 5067943f-6a75-4f58-afbd-b311fb2aab39) via D1 token
+- Applied D1 schema (d1-schema.sql): 6 tables (User, Session, ActivityLog, ArbAlert, BetJournal, ScrapingLog) + 7 indexes
+- Seeded D1 (d1-seed.sql): 3 users (admin@arbdesk.com, me.alex.21.3@gmail.com, test@example.com) + 6 scraping logs
+- Updated wrangler.toml with real D1 database_id
+- Added `export const runtime = 'edge'` to all 11 API routes (requirement for @cloudflare/next-on-pages)
+- Fixed critical isCF() environment detection bug: nodejs_compat polyfills process.versions.node, making the old check always return false on Cloudflare. Replaced all isCF() branching with try-catch D1-first fallback pattern across auth.ts, cloudflare-db.ts, and all 10 D1-aware API routes
+- Removed broken isCloudflare() function from cloudflare-db.ts
+- Built with @cloudflare/next-on-pages: 11 edge functions + 6 prerendered routes + 32 static assets
+- Deployed to Cloudflare Pages at https://arb-desk.pages.dev
+- D1 binding (DB) already configured on the Pages project
+- API verification: login, /auth/me, /odds, /admin/stats, /admin/users, /admin/scraping-logs, /admin/activity, /auth/register, /subscription/change-plan — all pass against D1
+- Browser verification: landing page renders, login flow works, dashboard shows 5 arbs from API, admin page shows 4 users with correct roles/tiers
+- Pushed to GitHub (main branch)
+
+Stage Summary:
+- Live at https://arb-desk.pages.dev with full D1 database backend
+- All 11 API endpoints running as Cloudflare Workers edge functions
+- D1-first architecture: tries D1 on Cloudflare, falls back to Prisma locally
+- Login credentials: admin@arbdesk.com / Admin123!, me.alex.21.3@gmail.com / Alex123!
