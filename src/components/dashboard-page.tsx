@@ -271,12 +271,16 @@ function ScannerPage({
   minEdge,
   confidenceFilter,
   searchQuery,
+  mode,
+  fetchedAt,
 }: {
   opportunities: ArbOpportunity[]
   sportFilter: string
   minEdge: number
   confidenceFilter: string
   searchQuery: string
+  mode?: string
+  fetchedAt?: string
 }) {
   const filtered = useMemo(() => {
     return opportunities.filter((o) => {
@@ -298,10 +302,25 @@ function ScannerPage({
     })
   }, [opportunities, sportFilter, minEdge, confidenceFilter, searchQuery])
 
+  const modeBadge = mode === 'live'
+    ? { label: 'LIVE', classes: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' }
+    : mode === 'error'
+      ? { label: 'Error', classes: 'bg-red-500/15 text-red-400 border-red-500/30' }
+      : { label: 'Demo Mode', classes: 'bg-amber-500/15 text-amber-400 border-amber-500/30' }
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
         <h2 className="text-lg font-semibold text-white">Arbitrage Opportunities</h2>
+        <Badge variant="outline" className={`text-xs font-medium ${modeBadge.classes}`}>
+          {modeBadge.label}
+        </Badge>
+        {mode === 'live' && fetchedAt && (
+          <span className="ml-auto flex items-center gap-1.5 text-xs text-emerald-400">
+            <Clock className="size-3.5" />
+            Last Scrape: {formatTime(fetchedAt)} ago
+          </span>
+        )}
         <span className="text-sm text-gray-500">
           {filtered.length} of {opportunities.length} found
         </span>
@@ -1223,6 +1242,8 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
             minEdge={minEdge}
             confidenceFilter={confidenceFilter}
             searchQuery={searchQuery}
+            mode={data.mode}
+            fetchedAt={data.fetchedAt}
           />
         )
       case 'value':
@@ -1308,10 +1329,38 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
 
             {/* Center */}
             <div className="hidden md:flex items-center gap-3">
-              <div className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1">
-                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-xs font-medium text-emerald-400">
-                  {data?.mode === 'demo' ? 'Demo Mode' : 'Live'}
+              <div
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 ${
+                  data?.mode === 'live'
+                    ? 'bg-emerald-500/10 border-emerald-500/20'
+                    : data?.mode === 'error'
+                      ? 'bg-red-500/10 border-red-500/20'
+                      : 'bg-amber-500/10 border-amber-500/20'
+                }`}
+              >
+                <div
+                  className={`h-2 w-2 rounded-full animate-pulse ${
+                    data?.mode === 'live'
+                      ? 'bg-emerald-400'
+                      : data?.mode === 'error'
+                        ? 'bg-red-400'
+                        : 'bg-amber-400'
+                  }`}
+                />
+                <span
+                  className={`text-xs font-medium ${
+                    data?.mode === 'live'
+                      ? 'text-emerald-400'
+                      : data?.mode === 'error'
+                        ? 'text-red-400'
+                        : 'text-amber-400'
+                  }`}
+                >
+                  {data?.mode === 'live'
+                    ? 'LIVE'
+                    : data?.mode === 'error'
+                      ? 'Error'
+                      : 'Demo Mode'}
                 </span>
               </div>
               {data?.fetchedAt && (
@@ -1324,10 +1373,38 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
             {/* Right */}
             <div className="flex items-center gap-2">
               {/* Mobile status pill */}
-              <div className="flex md:hidden items-center gap-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5">
-                <div className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-[10px] font-medium text-emerald-400">
-                  {data?.mode === 'demo' ? 'Demo' : 'Live'}
+              <div
+                className={`flex md:hidden items-center gap-1.5 rounded-full border px-2 py-0.5 ${
+                  data?.mode === 'live'
+                    ? 'bg-emerald-500/10 border-emerald-500/20'
+                    : data?.mode === 'error'
+                      ? 'bg-red-500/10 border-red-500/20'
+                      : 'bg-amber-500/10 border-amber-500/20'
+                }`}
+              >
+                <div
+                  className={`h-1.5 w-1.5 rounded-full animate-pulse ${
+                    data?.mode === 'live'
+                      ? 'bg-emerald-400'
+                      : data?.mode === 'error'
+                        ? 'bg-red-400'
+                        : 'bg-amber-400'
+                  }`}
+                />
+                <span
+                  className={`text-[10px] font-medium ${
+                    data?.mode === 'live'
+                      ? 'text-emerald-400'
+                      : data?.mode === 'error'
+                        ? 'text-red-400'
+                        : 'text-amber-400'
+                  }`}
+                >
+                  {data?.mode === 'live'
+                    ? 'LIVE'
+                    : data?.mode === 'error'
+                      ? 'Error'
+                      : 'Demo'}
                 </span>
               </div>
 

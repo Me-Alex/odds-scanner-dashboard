@@ -838,7 +838,9 @@ async function getOdds(request: Request, _pp: Record<string, string>) {
         return NextResponse.json(demoData)
       }
 
-      return NextResponse.json(buildOddsResponse(scrapedEvents as Record<string, unknown>[]))
+      const oddsResponse = buildOddsResponse(scrapedEvents as Record<string, unknown>[])
+      await enrichOddsWithArbs(oddsResponse, scrapedEvents as Record<string, unknown>[])
+      return NextResponse.json(oddsResponse)
     } catch {
       const { db } = await import('@/lib/db')
 
@@ -858,7 +860,9 @@ async function getOdds(request: Request, _pp: Record<string, string>) {
       }
 
       const mapped = scrapedEvents.map((e) => ({ ...e, matchTime: e.matchTime.toISOString(), fetchedAt: e.fetchedAt.toISOString() }))
-      return NextResponse.json(buildOddsResponse(mapped))
+      const oddsResponse = buildOddsResponse(mapped)
+      await enrichOddsWithArbs(oddsResponse, mapped)
+      return NextResponse.json(oddsResponse)
     }
   } catch (error) {
     if (error instanceof AuthError) {
@@ -924,7 +928,10 @@ async function fetchOddsSnapshot() {
     const eventsResult = await db.prepare('SELECT * FROM ScrapedEvent ORDER BY fetchedAt DESC LIMIT 200').all()
     const events = eventsResult.results || []
 
-    return { mode: 'live', fetchedAt: now, eventCount: Array.isArray(events) ? events.length : 0, events: Array.isArray(events) ? events.slice(0, 20) : [] }
+    const oddsResponse = buildOddsResponse(events as Record<string, unknown>[])
+    await enrichOddsWithArbs(oddsResponse, events as Record<string, unknown>[])
+    oddsResponse.fetchedAt = now
+    return oddsResponse
   } catch {
     const { db } = await import('@/lib/db')
     const count = await db.scrapedEvent.count()
@@ -933,12 +940,11 @@ async function fetchOddsSnapshot() {
 
     const events = await db.scrapedEvent.findMany({ orderBy: { fetchedAt: 'desc' }, take: 200 })
 
-    return {
-      mode: 'live',
-      fetchedAt: now,
-      eventCount: events.length,
-      events: events.slice(0, 20).map((e) => ({ ...e, matchTime: e.matchTime.toISOString(), fetchedAt: e.fetchedAt.toISOString() })),
-    }
+    const mapped = events.map((e: Record<string, unknown>) => ({ ...e, matchTime: (e.matchTime as Date).toISOString(), fetchedAt: (e.fetchedAt as Date).toISOString() }))
+    const oddsResponse = buildOddsResponse(mapped)
+    await enrichOddsWithArbs(oddsResponse, mapped)
+    oddsResponse.fetchedAt = now
+    return oddsResponse
   }
 }
 
@@ -1198,6 +1204,55 @@ function buildOddsResponse(scrapedEvents: Record<string, unknown>[]) {
     opportunities,
     arbitrages: opportunities,
     valueBets: calculateValueBetsFromEvents(groupedEvents),
+  }
+}
+
+async function enrichOddsWithArbs(
+  response: ReturnType<typeof buildOddsResponse>,
+  scrapedEvents: Record<string, unknown>[],
+) {
+  try {
+    const { detectArbitrages } = await import('@/lib/scrapers/scraping-engine')
+    // Convert scraped events back to NormalizedEvent format for arb detection
+    const normalizedEvents = scrapedEvents.map((row: Record<string, unknown>) => ({
+      externalId: row.externalId as string,
+      provider: row.provider as string,
+      sport: row.sport as string,
+      category: row.category as string,
+      tournament: row.tournament as string,
+      homeTeam: row.homeTeam as string,
+      awayTeam: row.awayTeam as string,
+      matchTime: row.matchTime as string,
+      bettingStatus: Boolean(row.bettingStatus),
+      isLive: Boolean(row.isLive),
+      odds: typeof row.oddsSnapshot === 'string' ? JSON.parse(row.oddsSnapshot) : (row.oddsSnapshot || {}),
+    }))
+    const arbs = detectArbitrages(normalizedEvents)
+
+    // Format arbs for frontend (edge converted to percentage)
+    response.opportunities = arbs.map((arb, i) => ({
+      id: `arb-${Date.now()}-${i}`,
+      eventId: `${arb.homeTeam}|||${arb.awayTeam}`,
+      sport: arb.sport,
+      competition: arb.competition,
+      homeTeam: arb.homeTeam,
+      awayTeam: arb.awayTeam,
+      marketType: arb.marketType,
+      edge: Math.round((arb.edge * 100) * 100) / 100,
+      confidence: arb.edge > 0.03 ? 'high' : arb.edge > 0.01 ? 'medium' : 'low',
+      bookmaker1: arb.bookmaker1,
+      bookmaker2: arb.bookmaker2,
+      selection1: arb.selection1,
+      selection2: arb.selection2,
+      odds1: arb.odds1,
+      odds2: arb.odds2,
+      impliedProb1: Math.round(arb.impliedProb1 * 10000) / 100,
+      impliedProb2: Math.round(arb.impliedProb2 * 10000) / 100,
+      startsAt: arb.matchTime,
+    }))
+    response.arbitrages = response.opportunities
+  } catch {
+    // Arb detection failed, keep existing opportunities from buildOddsResponse
   }
 }
 
