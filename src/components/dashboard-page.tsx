@@ -20,6 +20,8 @@ import {
   Shield,
   TrendingUp,
   ArrowUpRight,
+  CreditCard,
+  Crown,
 } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
 import { generateOddsData } from '@/lib/odds-data'
@@ -1104,7 +1106,13 @@ function SidebarNavContent({
 
 // ─── Main Dashboard ──────────────────────────────────────────────────────────
 
-export default function DashboardPage() {
+interface DashboardPageProps {
+  onGoToAdmin?: () => void
+  onGoToSubscription?: () => void
+  onLogout?: () => void
+}
+
+export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogout }: DashboardPageProps) {
   const [data, setData] = useState<OddsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [activePage, setActivePage] = useState<PageId>('scanner')
@@ -1115,7 +1123,7 @@ export default function DashboardPage() {
   const [confidenceFilter, setConfidenceFilter] = useState('all')
   const [refreshing, setRefreshing] = useState(false)
 
-  const { user, logout } = useAuthStore()
+  const { user, isAdmin, logout } = useAuthStore()
 
   const fetchData = useCallback(async () => {
     try {
@@ -1338,6 +1346,41 @@ export default function DashboardPage() {
                   className={`size-4 ${refreshing ? 'animate-spin' : ''}`}
                 />
               </Button>
+              {onGoToAdmin && isAdmin && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onGoToAdmin}
+                  className="h-8 bg-[#161b22] border-[#30363d] text-gray-300 hover:bg-[#1c2333] hover:text-white"
+                >
+                  <Shield className="w-3.5 h-3.5 mr-1.5" />
+                  <span className="hidden lg:inline">Admin</span>
+                </Button>
+              )}
+              {onGoToSubscription && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onGoToSubscription}
+                  className="h-8 bg-[#161b22] border-[#30363d] text-gray-300 hover:bg-[#1c2333] hover:text-white"
+                >
+                  <CreditCard className="w-3.5 h-3.5 mr-1.5" />
+                  <span className="hidden sm:inline text-xs">Plan: </span>
+                  <Crown className="w-3 h-3 ml-0.5 text-amber-400" />
+                  <span className="text-emerald-400 capitalize text-xs ml-0.5">{user?.subscriptionTier || 'free'}</span>
+                </Button>
+              )}
+              {onLogout && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onLogout}
+                  className="h-8 w-8 text-gray-400 hover:text-red-400 hover:bg-red-500/10"
+                  title="Sign out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </Button>
+              )}
             </div>
           </div>
 

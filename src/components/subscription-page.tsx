@@ -4,6 +4,7 @@ import React from 'react'
 import { motion } from 'framer-motion'
 import { Check, X, Crown, Rocket, Building2, Zap, ArrowLeft } from 'lucide-react'
 import { toast } from 'sonner'
+import { useAuthStore } from '@/lib/auth-store'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +14,7 @@ import { Badge } from '@/components/ui/badge'
 interface SubscriptionPageProps {
   currentTier: string
   onBack: () => void
+  onTierChange?: (newTier: string) => void
 }
 
 interface TierFeature {
@@ -98,7 +100,8 @@ const tierOrder = ['free', 'pro', 'enterprise']
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function SubscriptionPage({ currentTier, onBack }: SubscriptionPageProps) {
+export default function SubscriptionPage({ currentTier, onBack, onTierChange }: SubscriptionPageProps) {
+  const { user, logout } = useAuthStore()
   const currentIndex = tierOrder.indexOf(currentTier.toLowerCase())
 
   const getButtonConfig = (tierId: string) => {
@@ -114,9 +117,36 @@ export default function SubscriptionPage({ currentTier, onBack }: SubscriptionPa
 
   const handleCtaClick = (tierId: string) => {
     if (tierId.toLowerCase() === currentTier.toLowerCase()) return
-    toast.info('Coming soon - contact admin@arbdesk.com', {
-      description: `Subscription changes will be available in a future update.`,
-      duration: 4000,
+
+    // Update in localStorage
+    const usersKey = 'arbdesk_local_users'
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(usersKey)
+      if (raw) {
+        try {
+          const users = JSON.parse(raw)
+          const idx = users.findIndex((u: any) => u.email === user?.email)
+          if (idx >= 0) {
+            users[idx].subscriptionTier = tierId.toLowerCase()
+            localStorage.setItem(usersKey, JSON.stringify(users))
+          }
+        } catch {}
+      }
+    }
+
+    // Update in auth store
+    if (user) {
+      const updatedUser = { ...user, subscriptionTier: tierId.toLowerCase() }
+      localStorage.setItem('arbdesk_user', JSON.stringify(updatedUser))
+      useAuthStore.setState({ user: updatedUser })
+    }
+
+    // Notify parent
+    onTierChange?.(tierId.toLowerCase())
+
+    toast.success(`Plan changed to ${tierId}`, {
+      description: 'Your subscription has been updated.',
+      duration: 3000,
     })
   }
 

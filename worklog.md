@@ -159,3 +159,84 @@ Stage Summary:
 - Cloudflare deployment blocked by token permissions (needs Cloudflare Pages Edit permission)
 - GitHub Pages auto-deploys on every push to main branch
 - To enable Cloudflare: create a new API token with "Cloudflare Pages" edit permission at https://dash.cloudflare.com/profile/api-tokens
+
+---
+Task ID: 1
+Agent: subagent-landing-page
+Task: Create landing/hero page component for Arb Desk
+
+Work Log:
+- Created `/home/z/my-project/src/components/landing-page.tsx` — new dark-themed landing page
+- Props interface: `LandingPageProps` with `onLogin` and `onRegister` callbacks
+- Top navigation: sticky z-30 bar with Radar icon + "Arb Desk" brand, Log In (emerald-600) and Register (outline) buttons
+- Hero section: centered vertically with badge, h1, emerald sub-heading, description paragraph, two CTA buttons, fine print
+- Features grid: 3 cards (Live Odds Scanner, Arbitrage Detection, Value Bet Finder) with Scan/TrendingUp/Shield icons
+- Stats bar: 4 stats (15+ Bookmakers, 500+ Events Daily, 2.3% Avg Arb Edge, 99.9% Uptime) in 2x2 mobile / 4-col desktop
+- Footer: sticky at bottom via `mt-auto` in flex column layout
+- framer-motion: fade-in + y:20→0 animations on badge, heading, sub-heading, description, CTAs, feature cards, and stats
+- All styling matches design spec: #0d1117 bg, #161b22 cards, #30363d borders, emerald-400/500/600 accents
+- Build verified: `next build` compiles successfully with 0 errors
+
+Stage Summary:
+- Landing page component created at src/components/landing-page.tsx
+- Fully responsive (mobile-first: 1-col → 3-col features, 2x2 → 4-col stats)
+- Dark theme consistent with existing login/dashboard/admin/subscription pages
+- Ready to be wired into page.tsx router
+
+---
+Task ID: 3
+Agent: subagent-auth-seed
+Task: Add seed admin user and plan switching
+
+Work Log:
+- Added `ADMIN_EMAILS` constant with both admin emails: admin@arbdesk.com and me.alex.21.3@gmail.com
+- Added `SEED_USERS` array with two pre-configured admin users (Admin/Admin123! and Alex/Alex123!), both with enterprise tier
+- Rewrote `loadAllLocalUsers()` to merge seed users into localStorage on every load: inserts missing seed users, force-upgrades role/tier for existing seed accounts
+- Updated auto-create account fallback in `login()` to use `ADMIN_EMAILS.includes(email)` instead of single-email check
+- Added `onTierChange?: (newTier: string) => void` prop to SubscriptionPageProps
+- Imported `useAuthStore` in subscription-page.tsx, destructured `{ user, logout }`
+- Replaced "Coming soon" toast in `handleCtaClick` with actual plan-switching logic:
+  - Updates subscriptionTier in localStorage `arbdesk_local_users` array
+  - Updates user object in localStorage `arbdesk_user` key
+  - Updates Zustand store via `useAuthStore.setState({ user: updatedUser })`
+  - Calls `onTierChange` callback to notify parent component
+  - Shows success toast: "Plan changed to {tierId}"
+- Appended work record to worklog.md
+
+Stage Summary:
+- Two seed admin users are always present in localStorage after first auth-store load
+- Admin accounts are protected from accidental downgrade (role/tier re-applied on every load)
+- Subscription page now actually switches plans for testing instead of showing "Coming soon"
+- Plan changes persist in both localStorage and Zustand store immediately
+
+---
+Task ID: 2
+Agent: subagent-fix-overlap
+Task: Fix overlapping buttons — move Admin/Plan/Logout from page.tsx fixed overlay into dashboard header
+
+Work Log:
+- Identified overlap: `fixed top-3 right-3 z-50` buttons in page.tsx overlapped dashboard's `sticky top-0 z-30` header
+- Rewrote page.tsx:
+  - Added `LandingPage` import and `'landing'` to `AppView` union type (now default view)
+  - Removed ALL fixed overlay buttons (Admin, Plan, Logout) from the dashboard view wrapper div
+  - Removed unused `Crown`, `LogOut`, `Shield`, `CreditCard` lucide-react imports
+  - Changed logout to redirect to `'landing'` instead of `'login'`
+  - Moved Admin back button from `right-4` to `left-4` for consistency
+  - Passes `onGoToAdmin`, `onGoToSubscription`, `onLogout` callbacks as props to `<DashboardPage>`
+- Updated dashboard-page.tsx:
+  - Added `CreditCard` and `Crown` to lucide-react imports
+  - Created `DashboardPageProps` interface with optional `onGoToAdmin`, `onGoToSubscription`, `onLogout` callbacks
+  - Updated `DashboardPage` function signature to accept and destructure these props
+  - Added `isAdmin` to `useAuthStore()` destructuring
+  - Inserted Admin/Plan/Logout buttons inside the header's right-side `<div className="flex items-center gap-2">`, after the refresh button
+  - Admin button: hidden on screens smaller than lg, shows Shield icon + "Admin" text
+  - Plan button: shows CreditCard icon, Crown icon with tier badge (responsive text)
+  - Logout button: ghost icon button with LogOut icon, hover turns red
+  - Sidebar logout button preserved (available from both header and sidebar)
+- Build verified: `next build` compiles and exports successfully with 0 errors
+
+Stage Summary:
+- Overlapping buttons fixed — all dashboard action buttons now live inside the sticky header bar
+- No more z-index conflict between fixed overlay (z-50) and sticky header (z-30)
+- Dashboard header is the single source of truth for top-level navigation actions
+- Landing page is now the default view for unauthenticated users

@@ -29,6 +29,37 @@ interface AuthState {
 const TOKEN_KEY = 'arbdesk_token'
 const USER_KEY = 'arbdesk_user'
 
+const ADMIN_EMAILS = ['admin@arbdesk.com', 'me.alex.21.3@gmail.com']
+
+const SEED_USERS = [
+  {
+    id: 'seed-admin-1',
+    email: 'admin@arbdesk.com',
+    name: 'Admin',
+    passwordHash: btoa('Admin123!'),
+    role: 'admin',
+    subscriptionTier: 'enterprise',
+    subscriptionExpiresAt: null,
+    isActive: true,
+    lastLoginAt: null,
+    createdAt: new Date('2025-01-01').toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: 'seed-admin-2',
+    email: 'me.alex.21.3@gmail.com',
+    name: 'Alex',
+    passwordHash: btoa('Alex123!'),
+    role: 'admin',
+    subscriptionTier: 'enterprise',
+    subscriptionExpiresAt: null,
+    isActive: true,
+    lastLoginAt: null,
+    createdAt: new Date('2025-01-01').toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+]
+
 async function authFetch(
   url: string,
   options: RequestInit = {},
@@ -125,8 +156,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         id: crypto.randomUUID(),
         email,
         name: email.split('@')[0],
-        role: email === 'admin@arbdesk.com' ? 'admin' : 'user',
-        subscriptionTier: email === 'admin@arbdesk.com' ? 'enterprise' : 'free',
+        role: ADMIN_EMAILS.includes(email) ? 'admin' : 'user',
+        subscriptionTier: ADMIN_EMAILS.includes(email) ? 'enterprise' : 'free',
         subscriptionExpiresAt: null,
         isActive: true,
         createdAt: new Date().toISOString(),
@@ -262,12 +293,30 @@ function getLocalUsersKey() {
 function loadAllLocalUsers(): LocalUser[] {
   if (typeof window === 'undefined') return []
   const raw = localStorage.getItem(getLocalUsersKey())
-  if (!raw) return []
-  try {
-    return JSON.parse(raw) as LocalUser[]
-  } catch {
-    return []
+  let users: LocalUser[] = []
+  if (raw) {
+    try {
+      users = JSON.parse(raw) as LocalUser[]
+    } catch {
+      users = []
+    }
   }
+  // Ensure seed users always exist
+  for (const seed of SEED_USERS) {
+    const idx = users.findIndex(u => u.email === seed.email)
+    if (idx < 0) {
+      users.push(seed)
+    } else {
+      // Update role/tier if seed says admin/enterprise but local was downgraded
+      if (seed.role === 'admin') {
+        users[idx].role = 'admin'
+        users[idx].subscriptionTier = seed.subscriptionTier
+      }
+    }
+  }
+  // Save back
+  localStorage.setItem(getLocalUsersKey(), JSON.stringify(users))
+  return users
 }
 
 function saveLocalUser(user: LocalUser) {
