@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client'
-import bcrypt from 'bcryptjs'
+import { hashPassword } from '../src/lib/password'
 
 const db = new PrismaClient()
 
@@ -9,13 +9,13 @@ async function main() {
   // Create admin users
   const adminEmails = [
     { email: 'admin@arbdesk.com', name: 'Admin', password: 'Admin123!' },
-    { email: 'me.alex.21.3@gmail.com', name: 'Alex', password: 'Alex123!' },
+    { email: 'me.alex.21.3@gmail.com', name: 'Alex', password: 'Admin123!' },
   ]
 
   for (const admin of adminEmails) {
     const existing = await db.user.findUnique({ where: { email: admin.email } })
     if (!existing) {
-      const passwordHash = await bcrypt.hash(admin.password, 12)
+      const passwordHash = await hashPassword(admin.password)
       await db.user.create({
         data: {
           email: admin.email,
@@ -35,7 +35,7 @@ async function main() {
   // Create a demo regular user
   const testUser = await db.user.findUnique({ where: { email: 'test@example.com' } })
   if (!testUser) {
-    const passwordHash = await bcrypt.hash('Test123!', 12)
+    const passwordHash = await hashPassword('Test123!')
     await db.user.create({
       data: {
         email: 'test@example.com',
@@ -50,7 +50,7 @@ async function main() {
   }
 
   // Create demo scraping logs
-  const providers = ['Bet365', 'Pinnacle', 'DraftKings', 'FanDuel', 'BetMGM', 'Caesars']
+  const providers = ['winner', 'superbet', 'fortuna', 'digitain', 'nsoft', 'egt']
   const statuses: Array<'success' | 'error' | 'partial'> = ['success', 'success', 'success', 'partial', 'error', 'success']
 
   for (let i = 0; i < providers.length; i++) {
