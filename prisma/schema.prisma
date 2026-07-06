@@ -22,6 +22,8 @@ model User {
 
   sessions             Session[]
   activityLogs         ActivityLog[]
+  bets                 Bet[]
+  aiPickLogs           AiPickLog[]
 }
 
 model Session {
@@ -45,6 +47,128 @@ model ActivityLog {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
+// ─── Scraped Data ──────────────────────────────────────────────────────
+
+model ScrapedEvent {
+  id             String   @id @default(cuid())
+  externalId     String   // bookmaker's event ID
+  provider       String   // "winner", "888", "superbet", etc.
+  sport          String
+  category       String   // league/competition
+  tournament     String
+  homeTeam       String
+  awayTeam       String
+  matchTime      DateTime
+  bettingStatus  Boolean  @default(true)
+  isLive         Boolean  @default(false)
+  oddsSnapshot   String   // JSON: current odds from this provider
+  oddsCount      Int      @default(0)
+  fetchedAt      DateTime @default(now())
+
+  @@unique([externalId, provider])
+  @@index([provider, sport])
+  @@index([matchTime])
+}
+
+model ArbOpportunity {
+  id            String   @id @default(cuid())
+  eventId       String?  // links to ScrapedEvent if available
+  sport         String
+  competition   String
+  homeTeam      String
+  awayTeam      String
+  marketType    String   // "1X2", "Over/Under", etc.
+  selection1    String   // "1", "Over 2.5", etc.
+  selection2    String   // "2", "Under 2.5", etc.
+  bookmaker1    String
+  bookmaker2    String
+  odds1         Float
+  odds2         Float
+  edge          Float    // profit margin as decimal (0.03 = 3%)
+  impliedProb1  Float
+  impliedProb2  Float
+  seen          Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([sport, edge])
+  @@index([createdAt])
+}
+
+model OddsMovement {
+  id          String   @id @default(cuid())
+  eventId     String
+  provider    String
+  sport       String
+  homeTeam    String
+  awayTeam    String
+  marketType  String
+  selection   String
+  oldOdds     Float
+  newOdds     Float
+  change      Float    // positive = drifted up, negative = shortened
+  createdAt   DateTime @default(now())
+
+  @@index([provider, eventId])
+  @@index([createdAt])
+}
+
+// ─── User Bets ─────────────────────────────────────────────────────────
+
+model Bet {
+  id            String   @id @default(cuid())
+  userId        String
+  externalEventId String?
+  provider      String?  // which bookmaker
+  sport         String?
+  competition   String?
+  homeTeam      String
+  awayTeam      String
+  market        String   // "1X2", "Over/Under 2.5", etc.
+  selection     String   // "1", "X", "2", "Over", etc.
+  odds          Float
+  stake         Float
+  result        String   @default("pending") // "pending" | "won" | "lost" | "void" | "cashout"
+  payout        Float?
+  settledAt     DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, result])
+  @@index([userId, createdAt])
+  @@index([sport])
+}
+
+// ─── AI Picks ──────────────────────────────────────────────────────────
+
+model AiPickLog {
+  id            String   @id @default(cuid())
+  userId        String?
+  sport         String
+  competition   String?
+  homeTeam      String
+  awayTeam      String
+  market        String
+  selection     String
+  odds          Float
+  confidence    Float?   // 0-1
+  reasoning     String?
+  sourceEventId String?
+  result        String?  // "pending" | "won" | "lost" | "void"
+  settledAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  user          User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, result])
+  @@index([sport])
+  @@index([createdAt])
+}
+
+// ─── System / Legacy ───────────────────────────────────────────────────
+
 model ArbAlert {
   id          String   @id @default(cuid())
   eventId     String
@@ -60,25 +184,6 @@ model ArbAlert {
   createdAt   DateTime @default(now())
 }
 
-model BetJournal {
-  id          String   @id @default(cuid())
-  userId      String?
-  eventId     String?
-  homeTeam    String
-  awayTeam    String
-  competition String?
-  sport       String?
-  bookmaker   String
-  market      String
-  selection   String
-  odds        Float
-  stake       Float
-  result      String?  // "pending" | "won" | "lost" | "void"
-  payout      Float?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
 model ScrapingLog {
   id            String   @id @default(cuid())
   provider      String
@@ -87,4 +192,16 @@ model ScrapingLog {
   errorMsg      String?
   durationMs    Int?
   createdAt     DateTime @default(now())
+}
+
+model Bookmaker {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  isActive    Boolean  @default(true)
+  lastScrapeAt DateTime?
+  lastError   String?
+  eventsCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

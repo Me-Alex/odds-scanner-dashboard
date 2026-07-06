@@ -125,3 +125,85 @@ Stage Summary:
 - All 11 API endpoints running as Cloudflare Workers edge functions
 - D1-first architecture: tries D1 on Cloudflare, falls back to Prisma locally
 - Login credentials: admin@arbdesk.com / Admin123!, me.alex.21.3@gmail.com / Alex123!
+---
+Task ID: 2-b
+Agent: individual-ro-adapters
+Task: Build individual Romanian bookmaker adapters (Fortuna, Casa Pariurilor, Superbet, BetOne, GetsBet, LasVegas, MaxBet, Betmen)
+
+Work Log:
+- Created fortuna.ts adapter (REST JSON, Kindred platform, pre-match + live endpoints, sport IDs 1/2/13/4/6)
+- Created casa-pariurilor.ts adapter (REST JSON, NSoft platform, selections-based odds structure)
+- Created superbet.ts adapter (REST JSON, Kindred platform, primary + fallback API endpoints)
+- Created betone.ts adapter (REST JSON, independent platform, flat odds object structure)
+- Created getsbet.ts adapter (WAMP/REST hybrid, REST fallback implementation, full WAMP protocol documented for future mini-service)
+- Created lasvegas.ts adapter (REST JSON, independent platform, outcomes-based odds structure)
+- Created maxbet.ts adapter (REST JSON, independent platform, v2 API with selections/price fields)
+- Created betmen.ts adapter (HTML scraping, 3-strategy regex parser: embedded JSON blocks, data attributes, table patterns)
+
+Stage Summary:
+- All 8 individual bookmaker adapters implement BookmakerAdapter interface
+- Error handling returns partial results (partial status if some sports fail, error only if all fail)
+- GetsBet documented WAMP protocol for future mini-service implementation
+- Betmen uses multi-strategy HTML parsing (JSON blocks → data attributes → table patterns) with deduplication
+- All adapters export factory functions: createFortunaAdapter, createCasaPariurilorAdapter, createSuperbetAdapter, createBetOneAdapter, createGetsBetAdapter, createLasVegasAdapter, createMaxBetAdapter, createBetmenAdapter
+- Lint: 0 errors in adapter files
+---
+Task ID: 2-a
+Agent: digitain-nsoft-egt-adapters
+Task: Build Digitain, nSoft, and EGT bookmaker adapter implementations
+
+Work Log:
+- Created digitain.ts adapter (5 brands: Winner, MrPlay, Bet7, EliteSlots, 888)
+- Created nsoft.ts adapter (6 brands: Stanleybet, GameWorld, AdmiralBet, Seven, RedSevens, GPCasino)
+- Created egt.ts adapter (7 brands: Winbet, VivaBet, LuckySeven, OneCasino, MaxWin, Prowin, VipBet)
+
+Stage Summary:
+- All 3 platform adapters implement BookmakerAdapter interface via BaseAdapter
+- Each supports multi-brand configuration via factory functions (createDigitainAdapter, createNsoftAdapter, createEGTAdapter)
+- Error handling returns partial results with per-sport error messages
+- Digitain: paginated fetching (batches of 200), 6 sports, response type {data.events[]}
+- nSoft: dual-endpoint with automatic fallback (primary betzone → v2 fallback), 6 sports, sport codes (SR/BK/TN/IH/HB/VB)
+- EGT: flat odds map parsing (home→1, draw→X, away→2), 4 sports, response type {data[]}
+- ESLint and TypeScript checks pass with zero errors
+
+---
+Task ID: scraper-system
+Agent: main
+Task: Build complete real-time odds scraping system with 20+ bookmaker adapters
+
+Work Log:
+- Created /src/lib/scrapers/types.ts — Normalized types (NormalizedEvent, ScrapingResult, ArbDetection, OddsMovementRecord, BookmakerConfig, BookmakerAdapter interface) + sport/market/team name normalization maps
+- Created /src/lib/scrapers/base-adapter.ts — Abstract BaseAdapter with fetchJson, fetchHtml, parseOdds, parseMatchTime, buildResult helpers
+- Created /src/lib/scrapers/adapters/digitain.ts — Digitain platform adapter (5 brands: Winner, MrPlay, Bet7, EliteSlots, 888)
+- Created /src/lib/scrapers/adapters/nsoft.ts — nSoft platform adapter (6 brands: Stanleybet, GameWorld, AdmiralBet, Seven, RedSevens, GPCasino)
+- Created /src/lib/scrapers/adapters/egt.ts — EGT platform adapter (7 brands: Winbet, VivaBet, LuckySeven, OneCasino, MaxWin, Prowin, VipBet)
+- Created /src/lib/scrapers/adapters/fortuna.ts — Fortuna RO REST adapter
+- Created /src/lib/scrapers/adapters/casa-pariurilor.ts — Casa Pariurilor REST adapter
+- Created /src/lib/scrapers/adapters/superbet.ts — Superbet RO REST adapter
+- Created /src/lib/scrapers/adapters/betone.ts — BetOne REST adapter
+- Created /src/lib/scrapers/adapters/getsbet.ts — GetsBet WAMP/REST hybrid adapter
+- Created /src/lib/scrapers/adapters/lasvegas.ts — LasVegas REST adapter
+- Created /src/lib/scrapers/adapters/maxbet.ts — MaxBet REST adapter
+- Created /src/lib/scrapers/adapters/betmen.ts — Betmen HTML scraping adapter (3-strategy regex parser)
+- Created /src/lib/scrapers/adapters/kindred.ts — Kindred/Unibet CDN feed adapter
+- Created /src/lib/scrapers/adapters/sportify.ts — Sportify/NetBet REST adapter
+- Created /src/lib/scrapers/adapters/betano.ts — Kaizen Gaming/Betano REST adapter (anti-bot handling)
+- Created /src/lib/scrapers/adapters/betfair.ts — Betfair Exchange GraphQL adapter (back price extraction)
+- Created /src/lib/scrapers/adapters/the-odds-api.ts — The Odds API aggregator (PRIMARY data source, multi-bookmaker splitting)
+- Created /src/lib/scrapers/registry.ts — AdapterRegistry with 30+ adapter instances, getEnabled/getBySlug/getByPlatform
+- Created /src/lib/scrapers/scraping-engine.ts — scrapeAll (sequential with rate limits), scrapeSingle, detectArbitrages (2-way + 3-way), detectOddsMovements (cache-based diff), testAdapter/testAllAdapters
+- Created /src/lib/scrapers/index.ts — Barrel exports
+- Created /mini-services/scrape-service/ — Continuous scraping mini-service (port 3002, 60s interval)
+- Updated /src/app/api/odds/route.ts — Added ?refresh=1 trigger for real scraping, ?scrape=slug for single bookmaker, stores results in ScrapedEvent/ArbOpportunity/OddsMovement/ScrapingLog tables
+- Fixed security: /api/bets/settle now checks bet ownership, /api/ai-picks/settle now checks pick ownership, /api/ai-picks now scopes to authenticated user, /api/bets/import now supports batch import (up to 50 bets)
+- Updated dashboard-page.tsx — Added "Scrape" button (Zap icon, amber), scraping results banner showing per-provider status
+
+Stage Summary:
+- 16 bookmaker adapter files + 5 core scraper files = 21 new files
+- 30+ adapter instances registered covering all Romanian bookmakers
+- Scraping engine detects 2-way and 3-way arbs, tracks odds movements via cache diff
+- /api/odds?refresh=1 triggers full scrape and stores in DB
+- /api/odds?scrape=fortuna triggers single bookmaker scrape
+- All 26 API routes with edge runtime + D1-first pattern
+- Security fixes on settle endpoints and AI picks scoping
+- Lint: 0 errors across all files

@@ -1122,6 +1122,8 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
   const [minEdge, setMinEdge] = useState(0)
   const [confidenceFilter, setConfidenceFilter] = useState('all')
   const [refreshing, setRefreshing] = useState(false)
+  const [scraping, setScraping] = useState(false)
+  const [scrapeResult, setScrapeResult] = useState<{ totalEvents: number; results: Array<{ provider: string; status: string; eventsFound: number; durationMs: number; error?: string }> } | null>(null)
 
   const { user, isAdmin, logout } = useAuthStore()
 
@@ -1161,6 +1163,26 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
 
   const handleRefresh = () => {
     fetchData()
+  }
+
+  const handleScrapeNow = async () => {
+    setScraping(true)
+    setScrapeResult(null)
+    try {
+      const token = useAuthStore.getState().token
+      const res = await fetch('/api/odds?refresh=1', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (res.ok) {
+        const json = await res.json()
+        setScrapeResult(json.scraping || null)
+        // After scraping, reload the data
+        await fetchData()
+      }
+    } catch {
+      // scrape failed
+    }
+    setScraping(false)
   }
 
   const renderContent = () => {
@@ -1338,6 +1360,17 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
 
               <Button
                 variant="ghost"
+                size="sm"
+                onClick={handleScrapeNow}
+                disabled={scraping}
+                className="h-8 gap-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10"
+                title="Trigger live scraping from all bookmakers"
+              >
+                <Zap className={`size-3.5 ${scraping ? 'animate-pulse' : ''}`} />
+                <span className="hidden lg:inline text-xs">Scrape</span>
+              </Button>
+              <Button
+                variant="ghost"
                 size="icon"
                 onClick={handleRefresh}
                 disabled={refreshing}
@@ -1384,6 +1417,38 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
               )}
             </div>
           </div>
+
+          {/* Scraping results banner */}
+          {scrapeResult && (
+            <div className="relative mx-4 mb-2 rounded-lg bg-[#161b22] border border-[#30363d] p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Zap className="size-4 text-amber-400" />
+                  <span className="text-xs font-medium text-white">Scraping Complete</span>
+                </div>
+                <span className="text-xs text-gray-400">{scrapeResult.totalEvents} events found</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {scrapeResult.results.map((r, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-1 rounded-md bg-[#0d1117] px-2 py-1 text-[10px]"
+                  >
+                    <div className={`h-1.5 w-1.5 rounded-full ${r.status === 'success' ? 'bg-emerald-400' : r.status === 'partial' ? 'bg-amber-400' : 'bg-red-400'}`} />
+                    <span className="text-gray-400">{r.provider}</span>
+                    <span className="text-gray-600">({r.eventsFound})</span>
+                    {r.error && <span className="text-red-400/70 max-w-20 truncate">{r.error}</span>}
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => setScrapeResult(null)}
+                className="absolute top-2 right-2 text-gray-600 hover:text-gray-400 text-xs"
+              >
+                ×
+              </button>
+            </div>
+          )}
 
           {/* Scanner filters row */}
           {showScannerFilters && (
