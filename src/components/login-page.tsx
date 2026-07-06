@@ -290,7 +290,8 @@ function RegisterForm({ onAuthSuccess }: LoginPageProps) {
 export default function LoginPage({ onAuthSuccess }: LoginPageProps) {
   return (
     <GridBackground>
-      <main className="flex min-h-screen items-center justify-center px-4 py-12">
+      <div className="min-h-screen flex flex-col">
+        <main className="flex flex-1 items-center justify-center px-4 py-12">
         <div className="w-full max-w-md">
           {/* Branding */}
           <div className="mb-8 text-center">
@@ -358,6 +359,10 @@ export default function LoginPage({ onAuthSuccess }: LoginPageProps) {
           </Card>
         </div>
       </main>
+        <footer className="mt-auto border-t border-[#30363d] bg-[#0d1117] py-4 text-center text-xs text-gray-500">
+          © 2025 Arb Desk. All rights reserved.
+        </footer>
+      </div>
     </GridBackground>
   )
 }

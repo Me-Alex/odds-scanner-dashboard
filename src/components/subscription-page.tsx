@@ -290,6 +290,9 @@ export default function SubscriptionPage({ currentTier, onBack }: SubscriptionPa
           </motion.p>
         </div>
       </main>
+      <footer className="mt-auto border-t border-[#30363d] bg-[#0d1117] py-4 text-center text-xs text-gray-500 shrink-0">
+        © 2025 Arb Desk. All rights reserved.
+      </footer>
     </div>
   )
 }

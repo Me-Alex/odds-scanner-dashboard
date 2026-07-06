@@ -13,7 +13,6 @@ import {
   RefreshCw,
   Search,
   Menu,
-  X,
   LogOut,
   ChevronRight,
   Clock,
@@ -36,7 +35,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
-import { useIsMobile } from '@/hooks/use-mobile'
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -997,13 +1001,114 @@ function CalculatorPage() {
   )
 }
 
+// ─── Sidebar Nav Content (shared between desktop sidebar & mobile sheet) ─────
+
+function SidebarNavContent({
+  activePage,
+  onNavClick,
+  user,
+  onLogout,
+}: {
+  activePage: PageId
+  onNavClick: (id: PageId) => void
+  user: { email?: string; subscriptionTier?: string; role: string } | null
+  onLogout: () => void
+}) {
+  return (
+    <>
+      {/* Brand */}
+      <div className="flex items-center gap-2.5 p-4 border-b border-[#30363d]">
+        <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/15">
+          <Radar className="size-4.5 text-emerald-400" />
+        </div>
+        <span className="text-white font-bold text-lg tracking-tight">
+          Arb Desk
+        </span>
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 py-3 px-3 space-y-1 overflow-y-auto custom-scrollbar">
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon
+          const isActive = activePage === item.id
+          return (
+            <button
+              key={item.id}
+              onClick={() => onNavClick(item.id)}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                isActive
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  : 'text-gray-400 hover:text-white hover:bg-[#0d1117] border border-transparent'
+              }`}
+            >
+              <Icon className="size-4" />
+              {item.label}
+              {isActive && (
+                <ChevronRight className="size-3 ml-auto opacity-60" />
+              )}
+            </button>
+          )
+        })}
+      </nav>
+
+      {/* Upgrade prompt for free tier */}
+      {user?.subscriptionTier === 'free' && (
+        <div className="mx-3 mb-3">
+          <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-3">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <ArrowUpRight className="size-3.5 text-emerald-400" />
+              <span className="text-xs font-semibold text-emerald-400">
+                Upgrade
+              </span>
+            </div>
+            <p className="text-[11px] text-gray-500 leading-relaxed">
+              Unlock real-time alerts, more bookmakers, and advanced filters.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* User section */}
+      <div className="border-t border-[#30363d] p-3">
+        {user ? (
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-[#0d1117] border border-[#30363d]">
+              <span className="text-xs font-bold text-gray-400">
+                {user.email?.[0]?.toUpperCase() || 'U'}
+              </span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-gray-300 truncate">{user.email}</div>
+              <Badge
+                variant="outline"
+                className="text-[10px] border-[#30363d] text-gray-500 bg-[#0d1117] mt-0.5 px-1.5 py-0"
+              >
+                {user.role}
+              </Badge>
+            </div>
+            <button
+              onClick={onLogout}
+              className="text-gray-500 hover:text-red-400 transition-colors"
+              title="Logout"
+            >
+              <LogOut className="size-4" />
+            </button>
+          </div>
+        ) : (
+          <div className="text-xs text-gray-600 py-1">Not signed in</div>
+        )}
+      </div>
+    </>
+  )
+}
+
 // ─── Main Dashboard ──────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
   const [data, setData] = useState<OddsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [activePage, setActivePage] = useState<PageId>('scanner')
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sheetOpen, setSheetOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [sportFilter, setSportFilter] = useState('all')
   const [minEdge, setMinEdge] = useState(0)
@@ -1011,7 +1116,6 @@ export default function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false)
 
   const { user, logout } = useAuthStore()
-  const isMobile = useIsMobile()
 
   const fetchData = useCallback(async () => {
     try {
@@ -1043,7 +1147,7 @@ export default function DashboardPage() {
 
   const handleNavClick = (pageId: PageId) => {
     setActivePage(pageId)
-    if (isMobile) setSidebarOpen(false)
+    setSheetOpen(false)
   }
 
   const handleRefresh = () => {
@@ -1119,111 +1223,38 @@ export default function DashboardPage() {
   const showScannerFilters = activePage === 'scanner'
 
   return (
-    <div className="h-screen flex bg-[#0d1117] text-gray-300 overflow-hidden">
-      {/* ─── Mobile Overlay ─── */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/60 z-40 md:hidden"
-          onClick={() => setSidebarOpen(false)}
+    <div className="min-h-screen flex flex-col bg-[#0d1117] text-gray-300">
+      {/* ─── Mobile Navigation Sheet ─── */}
+      <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+        <SheetContent
+          side="left"
+          className="w-72 bg-[#161b22] border-[#30363d] p-0 gap-0 [&>button]:text-gray-400 [&>button:hover]:text-white [&>button:hover]:bg-[#0d1117]/80 [&>button]:top-3 [&>button]:right-3"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>Navigation Menu</SheetTitle>
+          </SheetHeader>
+          <div className="flex flex-col h-full">
+            <SidebarNavContent
+              activePage={activePage}
+              onNavClick={handleNavClick}
+              user={user}
+              onLogout={logout}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* ─── Sidebar + Main Row ─── */}
+      <div className="flex-1 flex overflow-hidden">
+
+      {/* ─── Desktop Sidebar (hidden on mobile) ─── */}
+      <aside className="hidden md:flex md:flex-col md:w-64 bg-[#161b22] border-r border-[#30363d] shrink-0">
+        <SidebarNavContent
+          activePage={activePage}
+          onNavClick={(id) => setActivePage(id)}
+          user={user}
+          onLogout={logout}
         />
-      )}
-
-      {/* ─── Sidebar ─── */}
-      <aside
-        className={`fixed md:static inset-y-0 left-0 z-50 w-64 bg-[#161b22] border-r border-[#30363d] flex flex-col transition-transform duration-300 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
-        }`}
-      >
-        {/* Brand */}
-        <div className="flex items-center justify-between p-4 border-b border-[#30363d]">
-          <div className="flex items-center gap-2.5">
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/15">
-              <Radar className="size-4.5 text-emerald-400" />
-            </div>
-            <span className="text-white font-bold text-lg tracking-tight">
-              Arb Desk
-            </span>
-          </div>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="md:hidden text-gray-400 hover:text-white transition-colors"
-          >
-            <X className="size-5" />
-          </button>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 py-3 px-3 space-y-1 overflow-y-auto custom-scrollbar">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon
-            const isActive = activePage === item.id
-            return (
-              <button
-                key={item.id}
-                onClick={() => handleNavClick(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  isActive
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : 'text-gray-400 hover:text-white hover:bg-[#0d1117] border border-transparent'
-                }`}
-              >
-                <Icon className="size-4" />
-                {item.label}
-                {isActive && (
-                  <ChevronRight className="size-3 ml-auto opacity-60" />
-                )}
-              </button>
-            )
-          })}
-        </nav>
-
-        {/* Upgrade prompt for free tier */}
-        {user?.subscriptionTier === 'free' && (
-          <div className="mx-3 mb-3">
-            <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-3">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <ArrowUpRight className="size-3.5 text-emerald-400" />
-                <span className="text-xs font-semibold text-emerald-400">
-                  Upgrade
-                </span>
-              </div>
-              <p className="text-[11px] text-gray-500 leading-relaxed">
-                Unlock real-time alerts, more bookmakers, and advanced filters.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* User section */}
-        <div className="border-t border-[#30363d] p-3">
-          {user ? (
-            <div className="flex items-center gap-3">
-              <div className="flex items-center justify-center w-8 h-8 rounded-full bg-[#0d1117] border border-[#30363d]">
-                <span className="text-xs font-bold text-gray-400">
-                  {user.email?.[0]?.toUpperCase() || 'U'}
-                </span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-xs text-gray-300 truncate">{user.email}</div>
-                <Badge
-                  variant="outline"
-                  className="text-[10px] border-[#30363d] text-gray-500 bg-[#0d1117] mt-0.5 px-1.5 py-0"
-                >
-                  {user.role}
-                </Badge>
-              </div>
-              <button
-                onClick={logout}
-                className="text-gray-500 hover:text-red-400 transition-colors"
-                title="Logout"
-              >
-                <LogOut className="size-4" />
-              </button>
-            </div>
-          ) : (
-            <div className="text-xs text-gray-600 py-1">Not signed in</div>
-          )}
-        </div>
       </aside>
 
       {/* ─── Main Content ─── */}
@@ -1234,7 +1265,7 @@ export default function DashboardPage() {
             {/* Left */}
             <div className="flex items-center gap-3">
               <button
-                onClick={() => setSidebarOpen(true)}
+                onClick={() => setSheetOpen(true)}
                 className="md:hidden text-gray-400 hover:text-white transition-colors"
               >
                 <Menu className="size-5" />
@@ -1370,6 +1401,14 @@ export default function DashboardPage() {
           {renderContent()}
         </section>
       </main>
+
+      </div>{/* ─── End Sidebar + Main Row ─── */}
+
+      {/* ─── Footer ─── */}
+      <footer className="mt-auto shrink-0 border-t border-[#30363d] bg-[#0d1117] px-4 md:px-6 py-3 flex items-center justify-between">
+        <span className="text-xs text-gray-500">© 2025 Arb Desk</span>
+        <span className="text-xs text-gray-500">Real-time Odds Intelligence</span>
+      </footer>
 
       {/* ─── Custom Scrollbar Styles ─── */}
       <style jsx global>{`
