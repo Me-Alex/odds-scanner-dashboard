@@ -138,3 +138,24 @@ Stage Summary:
 - Mobile responsive with proper Sheet drawer navigation
 - Sticky footers on all pages
 - Zero errors in lint, dev server, and browser console
+
+---
+Task ID: deploy
+Agent: Main Agent
+Task: Deploy project to GitHub Pages and attempt Cloudflare Pages
+
+Work Log:
+- Built Next.js static export (output: "export") → 1.6MB out/ directory
+- Attempted Cloudflare Pages deployment via wrangler and direct API
+- Cloudflare token (cfut_) can read accounts/zones but lacks Cloudflare Pages write permissions
+- Updated GitHub Pages source branch from codex/restore-odds-scraper to main
+- Fixed deploy.yml workflow: changed trigger to [main, codex/restore-odds-scraper]
+- Replaced actions/deploy-pages with peaceiris/actions-gh-pages for reliable gh-pages branch deployment
+- Pushed to GitHub → workflow triggered → build succeeded → deploy succeeded
+- Verified site live at https://me-alex.github.io/odds-scanner-dashboard/ (HTTP 200, 20KB, correct title)
+
+Stage Summary:
+- GitHub Pages is LIVE: https://me-alex.github.io/odds-scanner-dashboard/
+- Cloudflare deployment blocked by token permissions (needs Cloudflare Pages Edit permission)
+- GitHub Pages auto-deploys on every push to main branch
+- To enable Cloudflare: create a new API token with "Cloudflare Pages" edit permission at https://dash.cloudflare.com/profile/api-tokens
