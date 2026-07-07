@@ -44,9 +44,11 @@ const ROUTES: RouteEntry[] = [
   { segments: ['admin', 'scraping-logs'], method: 'GET', handler: getAdminScrapingLogs },
 
   // ── Odds ───────────────────────────────────────────────────────────
-  { segments: ['odds', 'stream'],   method: 'GET', handler: getOddsStream },
-  { segments: ['odds', 'movement'], method: 'GET', handler: getOddsMovement },
-  { segments: ['odds'],             method: 'GET', handler: getOdds },
+  { segments: ['odds', 'stream'],      method: 'GET',  handler: getOddsStream },
+  { segments: ['odds', 'movement'],    method: 'GET',  handler: getOddsMovement },
+  { segments: ['odds', 'auto-scrape'], method: 'POST', handler: postOddsAutoScrape },
+  { segments: ['odds', 'auto-scrape'], method: 'GET',  handler: getOddsAutoScrapeStatus },
+  { segments: ['odds'],                method: 'GET',  handler: getOdds },
 
   // ── Data ───────────────────────────────────────────────────────────
   { segments: ['opportunities'], method: 'GET', handler: getOpportunities },
@@ -988,6 +990,178 @@ async function getOddsMovement(request: Request, _pp: Record<string, string>) {
     }
     console.error('Route error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+}
+
+// POST /api/odds/auto-scrape — Trigger scrape via scraper-service and return fresh data
+async function postOddsAutoScrape(request: Request, _pp: Record<string, string>) {
+  // Auth is optional — try it but don't block if it fails (e.g., local dev without D1)
+  try {
+    await requireAuthFromRequest(request)
+  } catch {
+    // Continue without auth
+  }
+
+  const body = await request.json<{ action?: string; intervalMs?: number; query?: string }>().catch(() => ({}))
+
+  try {
+    // Try to call scraper-service (available in local dev via gateway)
+    const scraperBaseUrl = typeof process !== 'undefined' && process.env.NODE_ENV === 'development'
+      ? 'http://localhost:3003'
+      : '/?XTransformPort=3003'
+
+    const scraperUrl = body.action === 'status'
+      ? `${scraperBaseUrl}/status`
+      : `${scraperBaseUrl}/scrape-and-seed`
+
+    const method = body.action === 'status' ? 'GET' : 'POST'
+    const fetchOpts: RequestInit = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    }
+
+    if (method === 'POST') {
+      fetchOpts.body = JSON.stringify({ query: body.query })
+    }
+
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 120_000) // 2 min timeout for LLM scraping
+
+    const resp = await fetch(scraperUrl, { ...fetchOpts, signal: controller.signal })
+    clearTimeout(timeout)
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      // Scraper service not available (e.g., Cloudflare Pages) — return D1 data
+      return NextResponse.json({
+        mode: 'live',
+        fetchedAt: new Date().toISOString(),
+        scraperAvailable: false,
+        scraperError: `Scraper service unavailable: ${resp.status} ${errText.substring(0, 200)}`,
+        message: 'Using cached D1 data (scraper service not running)',
+        ...(await getOddsFromD1()),
+      })
+    }
+
+    const scrapeData = await resp.json()
+
+    if (scrapeData.success && scrapeData.seedResult?.eventsSeeded > 0) {
+      // Scrape succeeded and data seeded to D1 — return fresh D1 data
+      const oddsData = await getOddsFromD1()
+      return NextResponse.json({
+        mode: 'live',
+        fetchedAt: new Date().toISOString(),
+        scraperAvailable: true,
+        scraping: scrapeData.meta,
+        seedResult: scrapeData.seedResult,
+        message: `Scraped ${scrapeData.seedResult.eventsSeeded} events, seeded to D1`,
+        ...oddsData,
+      })
+    }
+
+    // Scrape returned no events or failed
+    return NextResponse.json({
+      mode: 'live',
+      fetchedAt: new Date().toISOString(),
+      scraperAvailable: true,
+      scraping: scrapeData.meta || null,
+      message: scrapeData.error || `Scraped ${scrapeData.events?.length || 0} events (none seeded)`,
+      ...(await getOddsFromD1()),
+    })
+  } catch (err) {
+    const errorMsg = String(err)
+    console.error('[auto-scrape] Error:', errorMsg)
+
+    // Scraper service failed — return D1 cached data
+    try {
+      const oddsData = await getOddsFromD1()
+      return NextResponse.json({
+        mode: 'live',
+        fetchedAt: new Date().toISOString(),
+        scraperAvailable: false,
+        scraperError: errorMsg,
+        message: 'Scraper failed, using cached D1 data',
+        ...oddsData,
+      })
+    } catch {
+      return NextResponse.json({
+        mode: 'error',
+        fetchedAt: new Date().toISOString(),
+        scraperAvailable: false,
+        scraperError: errorMsg,
+        message: 'Both scraper and D1 failed',
+        events: [],
+        opportunities: [],
+        valueBets: [],
+      })
+    }
+  }
+}
+
+// GET /api/odds/auto-scrape — Get scraper service status
+async function getOddsAutoScrapeStatus(request: Request, _pp: Record<string, string>) {
+  // Auth optional
+  try { await requireAuthFromRequest(request) } catch { /* continue */ }
+
+  try {
+    const statusUrl = typeof process !== 'undefined' && process.env.NODE_ENV === 'development'
+      ? 'http://localhost:3003/status'
+      : '/?XTransformPort=3003/status'
+    const resp = await fetch(statusUrl, { signal: AbortSignal.timeout(5000) })
+    if (!resp.ok) {
+      return NextResponse.json({ scraperAvailable: false, status: 'offline' })
+    }
+    const data = await resp.json()
+    return NextResponse.json({ scraperAvailable: true, ...data })
+  } catch {
+    return NextResponse.json({ scraperAvailable: false, status: 'offline' })
+  }
+}
+
+// Helper: Get odds from D1 (with Prisma fallback, graceful degradation)
+async function getOddsFromD1() {
+  try {
+    const D1 = await import('@/lib/cloudflare-db')
+    const db = await D1.getD1()
+    const result = await db.prepare('SELECT * FROM ScrapedEvent ORDER BY fetchedAt DESC LIMIT 500').all()
+    const scrapedEvents = result.results || []
+
+    if (!Array.isArray(scrapedEvents) || scrapedEvents.length === 0) {
+      return { events: [], opportunities: [], valueBets: [] }
+    }
+
+    const oddsResponse = buildOddsResponse(scrapedEvents as Record<string, unknown>[])
+    await enrichOddsWithArbs(oddsResponse, scrapedEvents as Record<string, unknown>[])
+    return {
+      events: oddsResponse.events,
+      opportunities: oddsResponse.opportunities,
+      valueBets: oddsResponse.valueBets,
+    }
+  } catch {
+    // D1 not available (local dev) — try Prisma
+    try {
+      const { db } = await import('@/lib/db')
+      const scrapedEvents = await db.scrapedEvent.findMany({
+        orderBy: { fetchedAt: 'desc' },
+        take: 500,
+      })
+
+      if (scrapedEvents.length === 0) {
+        return { events: [], opportunities: [], valueBets: [] }
+      }
+
+      const mapped = scrapedEvents.map((e) => ({ ...e, matchTime: e.matchTime.toISOString(), fetchedAt: e.fetchedAt.toISOString() }))
+      const oddsResponse = buildOddsResponse(mapped)
+      await enrichOddsWithArbs(oddsResponse, mapped)
+      return {
+        events: oddsResponse.events,
+        opportunities: oddsResponse.opportunities,
+        valueBets: oddsResponse.valueBets,
+      }
+    } catch {
+      // Neither D1 nor Prisma available — return empty
+      return { events: [], opportunities: [], valueBets: [] }
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { formatDistanceToNow } from 'date-fns'
 import {
@@ -106,6 +106,8 @@ interface OddsResponse {
   events: Event[]
   opportunities: ArbOpportunity[]
   valueBets: ValueBet[]
+  scraperAvailable?: boolean
+  message?: string
 }
 
 type PageId = 'scanner' | 'value' | 'matches' | 'bookmakers' | 'calculator'
@@ -1144,10 +1146,21 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
   const [scraping, setScraping] = useState(false)
   const [scrapeResult, setScrapeResult] = useState<{ totalEvents: number; results: Array<{ provider: string; status: string; eventsFound: number; durationMs: number; error?: string }> } | null>(null)
 
+  // Auto-scrape state
+  const [autoScraping, setAutoScraping] = useState(true) // starts automatically
+  const [autoScrapeCount, setAutoScrapeCount] = useState(0)
+  const [autoScrapeStatus, setAutoScrapeStatus] = useState<'idle' | 'scraping' | 'seeding' | 'done' | 'error'>('idle')
+  const [nextScrapeIn, setNextScrapeIn] = useState(0)
+  const [lastAutoScrapeMsg, setLastAutoScrapeMsg] = useState('')
+  const [scraperAvailable, setScraperAvailable] = useState<boolean | null>(null)
+  const autoScrapeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const isAutoScrapingRef = useRef(false) // prevent overlapping scrapes
+  const AUTO_SCRAPE_INTERVAL = 90 // seconds between auto-scrapes
+
   const { user, isAdmin, logout } = useAuthStore()
 
   const fetchData = useCallback(async () => {
-    setLoading(true)
     setRefreshing(true)
     try {
       const token = useAuthStore.getState().token
@@ -1161,19 +1174,109 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
     } catch {
       // fetch failed
     }
-    setLoading(false)
     setRefreshing(false)
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      await fetchData()
-      if (cancelled) return
+  // ─── Auto-Scrape: Trigger a single scrape cycle ─────────────────────
+  const runAutoScrape = useCallback(async () => {
+    if (isAutoScrapingRef.current) return // prevent overlap
+    isAutoScrapingRef.current = true
+    setAutoScrapeStatus('scraping')
+    setScraping(true)
+
+    try {
+      const token = useAuthStore.getState().token
+      const res = await fetch('/api/odds/auto-scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({}),
+      })
+
+      if (res.ok) {
+        const json = await res.json()
+        setScraperAvailable(json.scraperAvailable)
+
+        if (json.scraperAvailable && json.events?.length > 0) {
+          // Scraping succeeded — update data directly from response
+          setData({
+            mode: json.mode || 'live',
+            fetchedAt: json.fetchedAt,
+            previousFetchedAt: data?.fetchedAt || json.fetchedAt,
+            events: json.events,
+            opportunities: json.opportunities || [],
+            valueBets: json.valueBets || [],
+          })
+          setAutoScrapeStatus('done')
+          setLastAutoScrapeMsg(json.message || `Scraped ${json.events?.length || 0} events`)
+          setAutoScrapeCount(prev => prev + 1)
+        } else if (!json.scraperAvailable) {
+          // Scraper not available (Cloudflare) — just refresh D1 data
+          await fetchData()
+          setAutoScrapeStatus('done')
+          setLastAutoScrapeMsg('Using cached data (scraper offline)')
+          setAutoScrapeCount(prev => prev + 1)
+        } else {
+          // Scraper available but no new events
+          await fetchData()
+          setAutoScrapeStatus('done')
+          setLastAutoScrapeMsg(json.message || 'No new events found')
+          setAutoScrapeCount(prev => prev + 1)
+        }
+      } else {
+        setAutoScrapeStatus('error')
+        setLastAutoScrapeMsg('Scrape request failed')
+      }
+    } catch (err) {
+      setAutoScrapeStatus('error')
+      setLastAutoScrapeMsg(String(err))
     }
-    load()
-    return () => { cancelled = true }
-  }, [fetchData])
+
+    setScraping(false)
+    isAutoScrapingRef.current = false
+  }, [data?.fetchedAt, fetchData])
+
+  // Keep a stable ref to runAutoScrape for the interval
+  const runAutoScrapeRef = useRef(runAutoScrape)
+  runAutoScrapeRef.current = runAutoScrape
+
+  // ─── Auto-Scrape: Continuous loop management ────────────────────────
+  useEffect(() => {
+    if (!autoScraping) {
+      if (autoScrapeTimerRef.current) clearInterval(autoScrapeTimerRef.current)
+      if (countdownRef.current) clearInterval(countdownRef.current)
+      autoScrapeTimerRef.current = null
+      countdownRef.current = null
+      setNextScrapeIn(0)
+      return
+    }
+
+    // Initial load
+    setLoading(true)
+    runAutoScrapeRef.current().finally(() => setLoading(false))
+
+    // Start countdown
+    let secondsLeft = AUTO_SCRAPE_INTERVAL
+    setNextScrapeIn(secondsLeft)
+
+    countdownRef.current = setInterval(() => {
+      secondsLeft--
+      if (secondsLeft <= 0) secondsLeft = AUTO_SCRAPE_INTERVAL
+      setNextScrapeIn(secondsLeft)
+    }, 1000)
+
+    // Start auto-scrape interval
+    autoScrapeTimerRef.current = setInterval(() => {
+      runAutoScrapeRef.current()
+    }, AUTO_SCRAPE_INTERVAL * 1000)
+
+    return () => {
+      if (autoScrapeTimerRef.current) clearInterval(autoScrapeTimerRef.current)
+      if (countdownRef.current) clearInterval(countdownRef.current)
+    }
+  }, [autoScraping])
 
   const handleNavClick = (pageId: PageId) => {
     setActivePage(pageId)
@@ -1185,23 +1288,26 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
   }
 
   const handleScrapeNow = async () => {
-    setScraping(true)
-    setScrapeResult(null)
-    try {
-      const token = useAuthStore.getState().token
-      const res = await fetch('/api/odds?refresh=1', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-      if (res.ok) {
-        const json = await res.json()
-        setScrapeResult(json.scraping || null)
-        // After scraping, reload the data
-        await fetchData()
-      }
-    } catch {
-      // scrape failed
+    // Manual scrape = trigger immediate auto-scrape cycle
+    await runAutoScrape()
+    // Reset countdown
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      let secondsLeft = AUTO_SCRAPE_INTERVAL
+      countdownRef.current = setInterval(() => {
+        secondsLeft--
+        if (secondsLeft <= 0) secondsLeft = AUTO_SCRAPE_INTERVAL
+        setNextScrapeIn(secondsLeft)
+      }, 1000)
+      setNextScrapeIn(secondsLeft)
     }
-    setScraping(false)
+    // Reset auto-scrape timer
+    if (autoScrapeTimerRef.current) {
+      clearInterval(autoScrapeTimerRef.current)
+      autoScrapeTimerRef.current = setInterval(() => {
+        runAutoScrape()
+      }, AUTO_SCRAPE_INTERVAL * 1000)
+    }
   }
 
   const renderContent = () => {
@@ -1435,16 +1541,36 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
                 </SelectContent>
               </Select>
 
+              {/* Auto-Scrape Status Pill */}
+              <div className="flex items-center gap-1.5 mr-1">
+                <div className={`h-2 w-2 rounded-full ${autoScraping ? (scraping ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400') : 'bg-gray-600'}`} />
+                <span className="text-[11px] text-gray-400 hidden md:inline">
+                  {scraping ? 'Scraping…' : autoScraping ? `Next in ${nextScrapeIn}s` : 'Paused'}
+                </span>
+                {autoScrapeCount > 0 && (
+                  <span className="text-[10px] text-gray-600 hidden lg:inline">({autoScrapeCount} cycles)</span>
+                )}
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={handleScrapeNow}
                 disabled={scraping}
                 className="h-8 gap-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10"
-                title="Trigger live scraping from all bookmakers"
+                title="Trigger immediate scrape"
               >
                 <Zap className={`size-3.5 ${scraping ? 'animate-pulse' : ''}`} />
-                <span className="hidden lg:inline text-xs">Scrape</span>
+                <span className="hidden lg:inline text-xs">Scrape Now</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setAutoScraping(prev => !prev)}
+                className={`h-8 gap-1.5 ${autoScraping ? 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10' : 'text-gray-500 hover:text-gray-300 hover:bg-[#161b22]'}`}
+                title={autoScraping ? 'Pause auto-scraping' : 'Resume auto-scraping'}
+              >
+                <Radar className={`size-3.5 ${autoScraping && !scraping ? 'animate-spin' : ''}`} style={autoScraping && !scraping ? { animationDuration: '3s' } : {}} />
+                <span className="hidden lg:inline text-xs">{autoScraping ? 'Auto ON' : 'Auto OFF'}</span>
               </Button>
               <Button
                 variant="ghost"
@@ -1591,9 +1717,36 @@ export default function DashboardPage({ onGoToAdmin, onGoToSubscription, onLogou
       </div>{/* ─── End Sidebar + Main Row ─── */}
 
       {/* ─── Footer ─── */}
-      <footer className="mt-auto shrink-0 border-t border-[#30363d] bg-[#0d1117] px-4 md:px-6 py-3 flex items-center justify-between">
-        <span className="text-xs text-gray-500">© 2025 Arb Desk</span>
-        <span className="text-xs text-gray-500">Real-time Odds Intelligence</span>
+      <footer className="mt-auto shrink-0 border-t border-[#30363d] bg-[#0d1117] px-4 md:px-6 py-2.5 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="text-xs text-gray-500 shrink-0">© 2025 Arb Desk</span>
+          {/* Auto-scrape status bar */}
+          <div className="hidden sm:flex items-center gap-2 text-[11px] min-w-0">
+            <div className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+              scraping ? 'bg-amber-400 animate-pulse' :
+              autoScraping ? 'bg-emerald-400' : 'bg-gray-600'
+            }`} />
+            <span className={`truncate ${scraping ? 'text-amber-400' : autoScraping ? 'text-emerald-400/80' : 'text-gray-600'}`}>
+              {scraping ? 'Scraping odds…' :
+               lastAutoScrapeMsg || (autoScraping ? 'Auto-scrape active' : 'Auto-scrape paused')}
+            </span>
+            {autoScraping && !scraping && (
+              <span className="text-gray-600 shrink-0">· {nextScrapeIn}s</span>
+            )}
+            {autoScrapeCount > 0 && (
+              <span className="text-gray-700 shrink-0">({autoScrapeCount})</span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {data?.mode === 'live' && (
+            <span className="flex items-center gap-1 text-[11px] text-emerald-400/70">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              LIVE
+            </span>
+          )}
+          <span className="text-xs text-gray-500">Real-time Odds Intelligence</span>
+        </div>
       </footer>
 
       {/* ─── Custom Scrollbar Styles ─── */}

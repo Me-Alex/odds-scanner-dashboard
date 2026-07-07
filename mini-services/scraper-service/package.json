@@ -7,7 +7,6 @@
     "start": "bun index.ts"
   },
   "dependencies": {
-    "z-ai-web-dev-sdk": "latest",
-    "hono": "latest"
+    "z-ai-web-dev-sdk": "latest"
   }
 }
